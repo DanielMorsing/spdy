@@ -1,0 +1,9 @@
+a simple SPDY server.
+
+In order to learn a bit about SPDY, I figured I'd try to implement it in go.
+It is not really production ready and still missing some features, but it is possible to use it to
+host a reverse proxy on a local godoc server. Use at your own risk.
+
+For more information on how to use this package, refer to the godoc for this package.
+
+TODO: receive windows, client certificate vectors, server push, better prioritization strategy.
