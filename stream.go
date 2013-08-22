@@ -24,12 +24,14 @@ type stream struct {
 	window      uint32
 	priority    uint8
 	reset       chan error
-	retch       chan rwResult
+	wrch        chan streamWrite
+	retch       chan streamWriteRes
 	readch      chan rwRead
 	session     *session
 	receivedFin bool
 	sentFin     bool
 	blocked     bool
+	closed      bool
 
 	// mutex to protect the window variable
 	mu sync.Mutex
@@ -41,8 +43,9 @@ func newStream(sess *session, syn *spdy.SynStreamFrame) *stream {
 		priority: syn.Priority,
 		window:   sess.initialWindow,
 		reset:    make(chan error),
-		retch:    make(chan rwResult),
+		retch:    make(chan streamWriteRes),
 		readch:   make(chan rwRead),
+		wrch:     sess.streamch,
 		session:  sess,
 	}
 	if syn.CFHeader.Flags&spdy.ControlFlagFin != 0 {
@@ -52,23 +55,32 @@ func newStream(sess *session, syn *spdy.SynStreamFrame) *stream {
 
 }
 
+func (str *stream) isClosed() bool {
+	if str.closed {
+		return true
+	}
+	select {
+	case <-str.reset:
+		str.closed = true
+		return true
+	default:
+		return false
+	}
+}
+
 func (str *stream) handleReq(hnd http.Handler, hdr http.Header) {
 	req := mkrequest(hdr)
-	rw := rwWriter{
-		responseWriter: responseWriter{
-			stream: str,
-			header: make(http.Header),
-			retch:  str.retch,
-			ch:     str.session.streamch,
-			readch: str.readch,
-			ackch:  str.session.ackch,
-			finch:  str.session.finch,
-			reset:  str.reset,
-		},
+	rw := responseWriter{
+		stream: str,
+		header: make(http.Header),
+		readch: str.readch,
+		ackch:  str.session.ackch,
+		finch:  str.session.finch,
+		reset:  str.reset,
 	}
-	rw.bufw = bufio.NewWriter(&rw.responseWriter)
+	rw.bufw = bufio.NewWriter(str)
 	if !str.receivedFin {
-		req.Body = ioutil.NopCloser(&rw.responseWriter)
+		req.Body = ioutil.NopCloser(&rw)
 	}
 	go func() {
 		hnd.ServeHTTP(&rw, req)
@@ -129,6 +141,61 @@ func mkrequest(hdr http.Header) *http.Request {
 	return req
 }
 
+// types for ferrying data back and forth to the session
+type streamWrite struct {
+	b   []byte
+	str *stream
+	ret chan streamWriteRes
+}
+
+type streamWriteRes struct {
+	n   int
+	err error
+}
+
+func (str *stream) Write(b []byte) (int, error) {
+	n := 0
+	var err error
+	sw := streamWrite{b, str, str.retch}
+	ch := str.wrch
+	retch := chan streamWriteRes(nil)
+	for {
+		if str.isClosed() {
+			return 0, io.ErrClosedPipe
+		}
+		if len(b) == 0 {
+			break
+		}
+
+		sw.b = b
+		// Subtle code alert!
+		// if we hit the flow control cap, we wont receive an error
+		// until the session has had the window expanded.
+		// Use the trick from advanced concurrency pattern talk
+		// to handle resets.
+		select {
+		case ch <- sw:
+			retch = str.retch
+			ch = nil
+			continue
+		case ret := <-retch:
+			err = ret.err
+			n += ret.n
+			if err != nil {
+				break
+			}
+			b = b[ret.n:]
+			ch = str.wrch
+			retch = nil
+			continue
+		case err = <-str.reset:
+			str.closed = true
+			return n, io.ErrClosedPipe
+		}
+	}
+	return n, err
+}
+
 // builds a dataframe for the byte slice and updates the window.
 // if the window is empty, set the blocked field and return 0
 func (str *stream) buildDataframe(data *spdy.DataFrame, b []byte) int {
@@ -148,33 +215,13 @@ func (str *stream) buildDataframe(data *spdy.DataFrame, b []byte) int {
 	return len(b)
 }
 
-// small type to wrap a bufio.Writer around the responseWriter.
-type rwWriter struct {
-	bufw *bufio.Writer
-	responseWriter
-}
-
-func (rw *rwWriter) Write(b []byte) (int, error) {
-	if !rw.headerWritten {
-		rw.WriteHeader(http.StatusOK)
-	}
-	return rw.bufw.Write(b)
-}
-
-func (rw *rwWriter) close() error {
-	rw.bufw.Flush()
-	return rw.responseWriter.close()
-}
-
 type responseWriter struct {
 	stream        *stream
 	headerWritten bool
 	header        http.Header
 
-	// channels to send bytes to session and receive results
-	ch    chan rwWrite
-	retch chan rwResult
-	// channel which we receive resets on
+	bufw *bufio.Writer
+
 	reset chan error
 
 	readch  chan rwRead
@@ -186,6 +233,13 @@ type responseWriter struct {
 	ackch  chan rwAck
 	finch  chan *stream
 	closed bool
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	if !rw.headerWritten {
+		rw.WriteHeader(http.StatusOK)
+	}
+	return rw.bufw.Write(b)
 }
 
 func (rw *responseWriter) isClosed() bool {
@@ -215,62 +269,6 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.header.Set(":version", "HTTP/1.1")
 	rw.sendAck(rw.header)
 	rw.headerWritten = true
-}
-
-// types for ferrying data back and forth to the session
-type rwWrite struct {
-	b   []byte
-	str *stream
-	ret chan rwResult
-}
-
-type rwResult struct {
-	n   int
-	err error
-}
-
-// Writes body to the stream
-func (rw *responseWriter) Write(b []byte) (int, error) {
-	n := 0
-	var err error
-	sw := rwWrite{b, rw.stream, rw.retch}
-	ch := rw.ch
-	retch := chan rwResult(nil)
-	for {
-		if rw.isClosed() {
-			return 0, io.ErrClosedPipe
-		}
-		if len(b) == 0 {
-			break
-		}
-
-		sw.b = b
-		// Subtle code alert!
-		// if we hit the flow control cap, we wont receive an error
-		// until the session has had the window expanded.
-		// Use the trick from advanced concurrency pattern talk
-		// to handle resets.
-		select {
-		case ch <- sw:
-			retch = rw.retch
-			ch = nil
-			continue
-		case ret := <-retch:
-			err = ret.err
-			n += ret.n
-			if err != nil {
-				break
-			}
-			b = b[ret.n:]
-			ch = rw.ch
-			retch = nil
-			continue
-		case err = <-rw.reset:
-			rw.closed = true
-			return n, io.ErrClosedPipe
-		}
-	}
-	return n, err
 }
 
 type rwRead struct {
@@ -336,6 +334,7 @@ func (rw *responseWriter) sendAck(hdr http.Header) {
 
 // closes stream. Sends a data frame with the Fin flag set
 func (rw *responseWriter) close() error {
+	rw.bufw.Flush()
 	if rw.isClosed() {
 		return nil
 	}

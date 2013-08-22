@@ -6,7 +6,6 @@ package spdy
 import (
 	"bufio"
 	"code.google.com/p/go.net/spdy"
-	"container/heap"
 	"io"
 	"log"
 	"net"
@@ -34,7 +33,7 @@ type session struct {
 	bw *bufio.Writer
 
 	// channels to communicate with streams
-	streamch chan rwWrite
+	streamch chan streamWrite
 	ackch    chan rwAck
 	finch    chan *stream
 
@@ -65,7 +64,7 @@ func (ps *Server) newSession(c net.Conn) (*session, error) {
 	s := &session{
 		maxStreams:    100,
 		closech:       make(chan struct{}),
-		streamch:      make(chan rwWrite),
+		streamch:      make(chan streamWrite),
 		ackch:         make(chan rwAck),
 		finch:         make(chan *stream),
 		pingch:        make(chan *spdy.PingFrame, 1),
@@ -168,10 +167,9 @@ func (s *session) writeFrame(f spdy.Frame) error {
 // serve handles events coming from the various streams.
 func (s *session) serve() {
 	go s.readFrames()
-	prioch := s.prioritize()
 	for {
 		select {
-		case sd := <-prioch:
+		case sd := <-s.streamch:
 			n := sd.str.buildDataframe(&s.data, sd.b)
 			if n == 0 {
 				// window is empty. Wait for update.
@@ -183,7 +181,7 @@ func (s *session) serve() {
 				return
 			}
 			select {
-			case sd.ret <- rwResult{n, err}:
+			case sd.ret <- streamWriteRes{n, err}:
 			case <-sd.str.reset:
 			}
 		case syn := <-s.ackch:
@@ -231,68 +229,6 @@ func makeFin(d *spdy.DataFrame, id spdy.StreamId) {
 	d.Flags = spdy.DataFlagFin
 	d.StreamId = id
 	d.Data = nil
-}
-
-type prioQueue []rwWrite
-
-func (ph prioQueue) Len() int            { return len(ph) }
-func (ph prioQueue) Swap(i, j int)       { ph[i], ph[j] = ph[j], ph[i] }
-func (ph *prioQueue) Push(i interface{}) { *ph = append(*ph, i.(rwWrite)) }
-func (ph *prioQueue) Pop() interface{} {
-	i := (*ph)[len(*ph)-1]
-	*ph = (*ph)[:len(*ph)-1]
-	return i
-}
-func (ph prioQueue) Less(i, j int) bool {
-	return ph[i].str.priority < ph[j].str.priority
-}
-
-// first attempt at implementing priority in spdy. this goroutine just prioritizes outstanding writes.
-// right now it is kind of flawed, since a stream can only have one write pending at any time.
-// which means that if a prio 6 stream is currently being written and a prio 2 frame comes along,
-// the prio 2 frame will be scheduled next, rather than the next frame of the prio 6 stream.
-// The correct solution would probably be to implement buffering session side and schedule streams, rather than frames.
-
-func (s *session) prioritize() chan rwWrite {
-	outch := make(chan rwWrite)
-	out := outch
-
-	in := s.streamch
-	var prio prioQueue
-	var rwout rwWrite
-	go func() {
-		select {
-		case rwout = <-in:
-		case <-s.closech:
-			return
-		}
-		for {
-			select {
-			case out <- rwout:
-				if len(prio) == 0 {
-					// just sent the last value in the heap.
-					// wait until we have a new one
-					out = nil
-				} else {
-					rwout = heap.Pop(&prio).(rwWrite)
-				}
-			case rw := <-in:
-				if out == nil {
-					out = outch
-					rwout = rw
-					continue
-				}
-				if rw.str.priority < rwout.str.priority {
-					rwout, rw = rw, rwout
-				}
-				heap.Push(&prio, rw)
-			case <-s.closech:
-				return
-			}
-		}
-	}()
-
-	return outch
 }
 
 // readFrames read frames from the connection and handles
@@ -413,7 +349,7 @@ func (s *session) handleWindowUpdate(upd *spdy.WindowUpdateFrame) {
 		// so tell the responseWriter to restart the write.
 		str.blocked = false
 		select {
-		case str.retch <- rwResult{0, nil}:
+		case str.retch <- streamWriteRes{0, nil}:
 		case <-str.reset:
 		}
 	}
