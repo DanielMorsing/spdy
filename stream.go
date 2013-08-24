@@ -21,17 +21,17 @@ type stream struct {
 	id spdy.StreamId
 
 	// window size
-	window      uint32
-	priority    uint8
-	reset       chan error
-	wrch        chan streamWrite
-	retch       chan streamWriteRes
-	readch      chan rwRead
-	session     *session
-	receivedFin bool
-	sentFin     bool
-	blocked     bool
-	closed      bool
+	window       uint32
+	priority     uint8
+	reset        chan error
+	wrch         chan streamWrite
+	retch        chan error
+	readch       chan rwRead
+	windowupdate chan uint32
+	session      *session
+	receivedFin  bool
+	sentFin      bool
+	closed       bool
 
 	// mutex to protect the window variable
 	mu sync.Mutex
@@ -39,14 +39,15 @@ type stream struct {
 
 func newStream(sess *session, syn *spdy.SynStreamFrame) *stream {
 	s := &stream{
-		id:       syn.StreamId,
-		priority: syn.Priority,
-		window:   sess.initialWindow,
-		reset:    make(chan error),
-		retch:    make(chan streamWriteRes),
-		readch:   make(chan rwRead),
-		wrch:     sess.streamch,
-		session:  sess,
+		id:           syn.StreamId,
+		priority:     syn.Priority,
+		window:       sess.initialWindow,
+		reset:        make(chan error),
+		retch:        make(chan error),
+		readch:       make(chan rwRead),
+		wrch:         sess.streamch,
+		windowupdate: make(chan uint32, 1),
+		session:      sess,
 	}
 	if syn.CFHeader.Flags&spdy.ControlFlagFin != 0 {
 		s.receivedFin = true
@@ -145,20 +146,17 @@ func mkrequest(hdr http.Header) *http.Request {
 type streamWrite struct {
 	b   []byte
 	str *stream
-	ret chan streamWriteRes
-}
-
-type streamWriteRes struct {
-	n   int
-	err error
+	ret chan error
 }
 
 func (str *stream) Write(b []byte) (int, error) {
 	n := 0
+	sendlen := 0
 	var err error
 	sw := streamWrite{b, str, str.retch}
 	ch := str.wrch
-	retch := chan streamWriteRes(nil)
+	retch := chan error(nil)
+
 	for {
 		if str.isClosed() {
 			return 0, io.ErrClosedPipe
@@ -166,53 +164,46 @@ func (str *stream) Write(b []byte) (int, error) {
 		if len(b) == 0 {
 			break
 		}
+		if str.window == 0 {
+			ch = nil
+		}
+		if len(b) >= int(str.window) {
+			sw.b = b[:str.window]
+		} else {
+			sw.b = b
+		}
 
-		sw.b = b
 		// Subtle code alert!
-		// if we hit the flow control cap, we wont receive an error
-		// until the session has had the window expanded.
-		// Use the trick from advanced concurrency pattern talk
-		// to handle resets.
+		// if ch is non-nil, that means we're ready to send another buffer.
+		// if retch != nil, we're waiting for a response.
+		// this is important for how we manage the window update case.
 		select {
 		case ch <- sw:
+			sendlen = len(sw.b)
 			retch = str.retch
 			ch = nil
-			continue
 		case ret := <-retch:
-			err = ret.err
-			n += ret.n
+			err = ret
 			if err != nil {
 				break
 			}
-			b = b[ret.n:]
+
+			n += sendlen
+			str.window -= uint32(sendlen)
+			b = b[sendlen:]
 			ch = str.wrch
 			retch = nil
-			continue
+		case wd := <-str.windowupdate:
+			str.window += wd
+			if retch == nil {
+				ch = str.wrch
+			}
 		case err = <-str.reset:
 			str.closed = true
 			return n, io.ErrClosedPipe
 		}
 	}
 	return n, err
-}
-
-// builds a dataframe for the byte slice and updates the window.
-// if the window is empty, set the blocked field and return 0
-func (str *stream) buildDataframe(data *spdy.DataFrame, b []byte) int {
-	data.StreamId = str.id
-	data.Flags = 0
-	str.mu.Lock()
-	defer str.mu.Unlock()
-	if str.window == 0 {
-		str.blocked = true
-		return 0
-	}
-	if len(b) > int(str.window) {
-		b = b[:str.window]
-	}
-	str.window -= uint32(len(b))
-	data.Data = b
-	return len(b)
 }
 
 type responseWriter struct {

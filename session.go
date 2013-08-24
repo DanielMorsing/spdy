@@ -170,18 +170,16 @@ func (s *session) serve() {
 	for {
 		select {
 		case sd := <-s.streamch:
-			n := sd.str.buildDataframe(&s.data, sd.b)
-			if n == 0 {
-				// window is empty. Wait for update.
-				continue
-			}
+			s.data.StreamId = sd.str.id
+			s.data.Flags = 0
+			s.data.Data = sd.b
 			err := s.writeFrame(&s.data)
 			if err != nil {
 				s.close()
 				return
 			}
 			select {
-			case sd.ret <- streamWriteRes{n, err}:
+			case sd.ret <- err:
 			case <-sd.str.reset:
 			}
 		case syn := <-s.ackch:
@@ -334,26 +332,10 @@ func (s *session) handleWindowUpdate(upd *spdy.WindowUpdateFrame) {
 		// spec says do nothing.
 		return
 	}
-	str.mu.Lock()
-	defer str.mu.Unlock()
-	newWindow := str.window + upd.DeltaWindowSize
-	if newWindow&1<<32 != 0 {
-		s.sendRst(str.id, spdy.FlowControlError)
-		return
+	select {
+	case str.windowupdate <- upd.DeltaWindowSize:
+	case <-str.reset:
 	}
-	str.window = newWindow
-	if str.blocked {
-		// the stream can only be blocked when it has sent
-		// a write request and is ready to receive an error.
-		// Framer is being written to by another goroutine,
-		// so tell the responseWriter to restart the write.
-		str.blocked = false
-		select {
-		case str.retch <- streamWriteRes{0, nil}:
-		case <-str.reset:
-		}
-	}
-
 }
 
 func (s *session) sendRst(id spdy.StreamId, status spdy.RstStreamStatus) {
