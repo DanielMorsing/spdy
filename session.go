@@ -6,6 +6,7 @@ package spdy
 import (
 	"bufio"
 	"code.google.com/p/go.net/spdy"
+	"container/heap"
 	"io"
 	"log"
 	"net"
@@ -167,9 +168,10 @@ func (s *session) writeFrame(f spdy.Frame) error {
 // serve handles events coming from the various streams.
 func (s *session) serve() {
 	go s.readFrames()
+	prio := s.prioritize()
 	for {
 		select {
-		case sd := <-s.streamch:
+		case sd := <-prio:
 			s.data.StreamId = sd.str.id
 			s.data.Flags = 0
 			s.data.Data = sd.b
@@ -213,6 +215,68 @@ func (s *session) serve() {
 			return
 		}
 	}
+}
+
+type prioQueue []streamWrite
+
+func (ph prioQueue) Len() int            { return len(ph) }
+func (ph prioQueue) Swap(i, j int)       { ph[i], ph[j] = ph[j], ph[i] }
+func (ph *prioQueue) Push(i interface{}) { *ph = append(*ph, i.(streamWrite)) }
+func (ph *prioQueue) Pop() interface{} {
+	i := (*ph)[len(*ph)-1]
+	*ph = (*ph)[:len(*ph)-1]
+	return i
+}
+func (ph prioQueue) Less(i, j int) bool {
+	return ph[i].str.priority < ph[j].str.priority
+}
+
+// naive prioritization. Since there's no buffering, it schedules only on streams with have pending writes.
+// which means that if a prio 6 stream is currently being written and a prio 2 frame comes along,
+// the prio 2 frame will be scheduled next, rather than the next frame of the prio 6 stream.
+// You could imagine a better solution with some buffering, but it is expensive, and prioritization is best effort
+// according to the spec. Doing a better job simply not worth it.
+
+func (s *session) prioritize() chan streamWrite {
+	outch := make(chan streamWrite)
+
+	go func() {
+		var prio prioQueue
+		var rwout streamWrite
+		out := outch
+
+		select {
+		case rwout = <-s.streamch:
+		case <-s.closech:
+			return
+		}
+		for {
+			select {
+			case out <- rwout:
+				if len(prio) == 0 {
+					// just sent the last value in the heap.
+					// wait until we have a new one
+					out = nil
+				} else {
+					rwout = heap.Pop(&prio).(streamWrite)
+				}
+			case rw := <-s.streamch:
+				if out == nil {
+					out = outch
+					rwout = rw
+					continue
+				}
+				if rw.str.priority < rwout.str.priority {
+					rwout, rw = rw, rwout
+				}
+				heap.Push(&prio, rw)
+			case <-s.closech:
+				return
+			}
+		}
+	}()
+
+	return outch
 }
 
 // makeSynReply builds a SynReply with a given header and streamid

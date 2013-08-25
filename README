@@ -6,4 +6,4 @@ host a reverse proxy on a local godoc server. Use at your own risk.
 
 For more information on how to use this package, refer to the godoc for this package.
 
-TODO: receive windows, client certificate vectors, server push, better prioritization strategy.
+TODO: receive windows, client certificate vectors, server push.
