@@ -25,7 +25,7 @@ type stream struct {
 	priority    uint8
 	reset       chan error
 	wrch        chan streamWrite
-	retch       chan streamWriteRes
+	retch       chan int
 	readch      chan rwRead
 	session     *session
 	receivedFin bool
@@ -43,7 +43,7 @@ func newStream(sess *session, syn *spdy.SynStreamFrame) *stream {
 		priority: syn.Priority,
 		window:   sess.initialWindow,
 		reset:    make(chan error),
-		retch:    make(chan streamWriteRes),
+		retch:    make(chan int),
 		readch:   make(chan rwRead),
 		wrch:     sess.streamch,
 		session:  sess,
@@ -145,7 +145,6 @@ func mkrequest(hdr http.Header) *http.Request {
 type streamWrite struct {
 	b   []byte
 	str *stream
-	ret chan streamWriteRes
 }
 
 type streamWriteRes struct {
@@ -156,9 +155,9 @@ type streamWriteRes struct {
 func (str *stream) Write(b []byte) (int, error) {
 	n := 0
 	var err error
-	sw := streamWrite{b, str, str.retch}
+	sw := streamWrite{b, str}
 	ch := str.wrch
-	retch := chan streamWriteRes(nil)
+	retch := chan int(nil)
 	for {
 		if str.isClosed() {
 			return 0, io.ErrClosedPipe
@@ -179,12 +178,8 @@ func (str *stream) Write(b []byte) (int, error) {
 			ch = nil
 			continue
 		case ret := <-retch:
-			err = ret.err
-			n += ret.n
-			if err != nil {
-				break
-			}
-			b = b[ret.n:]
+			n += ret
+			b = b[ret:]
 			ch = str.wrch
 			retch = nil
 			continue

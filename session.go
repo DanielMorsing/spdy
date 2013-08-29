@@ -183,7 +183,7 @@ func (s *session) serve() {
 				return
 			}
 			select {
-			case sd.ret <- streamWriteRes{n, err}:
+			case sd.str.retch <- n:
 			case <-sd.str.reset:
 			}
 		case syn := <-s.ackch:
@@ -413,7 +413,7 @@ func (s *session) handleWindowUpdate(upd *spdy.WindowUpdateFrame) {
 		// so tell the responseWriter to restart the write.
 		str.blocked = false
 		select {
-		case str.retch <- streamWriteRes{0, nil}:
+		case str.retch <- 0:
 		case <-str.reset:
 		}
 	}
