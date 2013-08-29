@@ -42,6 +42,7 @@ type session struct {
 	// that make up the server.
 	pingch    chan *spdy.PingFrame
 	sendReset chan *spdy.RstStreamFrame
+	windowOut chan windowupdate
 
 	// channel to bail out of the main event loop when closed
 	closech chan struct{}
@@ -56,8 +57,9 @@ type session struct {
 	lastClientStream spdy.StreamId
 
 	// memory caches for commonly used frames
-	data  spdy.DataFrame
-	reply spdy.SynReplyFrame
+	data   spdy.DataFrame
+	reply  spdy.SynReplyFrame
+	window spdy.WindowUpdateFrame
 }
 
 // newSession initiates a SPDY session
@@ -70,6 +72,7 @@ func (ps *Server) newSession(c net.Conn) (*session, error) {
 		finch:         make(chan *stream),
 		pingch:        make(chan *spdy.PingFrame, 1),
 		sendReset:     make(chan *spdy.RstStreamFrame, 1),
+		windowOut:     make(chan windowupdate, 10),
 		conn:          c,
 		server:        ps,
 		initialWindow: 64 << 10, // 64 kb
@@ -113,7 +116,12 @@ func (s *session) closeStream(str *stream, isReset bool) {
 
 	receivedFin := str.receivedFin
 	str.sentFin = !isReset
-	close(str.reset)
+
+	select {
+	case <-str.reset:
+	default:
+		close(str.reset)
+	}
 
 	str.mu.Unlock()
 
@@ -194,13 +202,13 @@ func (s *session) serve() {
 				return
 			}
 		case fin := <-s.finch:
-			s.closeStream(fin, false)
 			makeFin(&s.data, fin.id)
 			err := s.writeFrame(&s.data)
 			if err != nil {
 				s.close()
 				return
 			}
+			s.closeStream(fin, false)
 		case f := <-s.pingch:
 			err := s.writeFrame(f)
 			if err != nil {
@@ -209,6 +217,14 @@ func (s *session) serve() {
 			}
 		case f := <-s.sendReset:
 			err := s.writeFrame(f)
+			if err != nil {
+				s.close()
+				return
+			}
+		case wo := <-s.windowOut:
+			s.window.StreamId = wo.id
+			s.window.DeltaWindowSize = uint32(wo.d)
+			err := s.writeFrame(&s.window)
 			if err != nil {
 				s.close()
 				return
@@ -435,10 +451,21 @@ func (s *session) sendRst(id spdy.StreamId, status spdy.RstStreamStatus) {
 	}
 }
 
+type windowupdate struct {
+	d  int
+	id spdy.StreamId
+}
+
 func (s *session) handleData(data *spdy.DataFrame) {
 	stream, ok := s.getStream(data.StreamId)
 	if !ok {
 		s.sendRst(data.StreamId, spdy.InvalidStream)
+		return
+	}
+	// naive window logic. always try to keep the window at the default size.
+	select {
+	case s.windowOut <- windowupdate{len(data.Data), data.StreamId}:
+	case <-stream.reset:
 		return
 	}
 	stream.mu.Lock()

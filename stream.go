@@ -147,11 +147,6 @@ type streamWrite struct {
 	str *stream
 }
 
-type streamWriteRes struct {
-	n   int
-	err error
-}
-
 func (str *stream) Write(b []byte) (int, error) {
 	n := 0
 	var err error
