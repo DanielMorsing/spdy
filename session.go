@@ -5,8 +5,8 @@ package spdy
 
 import (
 	"bufio"
-	"code.google.com/p/go.net/spdy"
 	"container/heap"
+	"github.com/DanielMorsing/spdy/framing"
 	"io"
 	"log"
 	"net"
@@ -19,7 +19,7 @@ import (
 type session struct {
 	// a map of active streams. If a stream has been closed on both ends
 	// it will be removed from this map.
-	streams map[spdy.StreamId]*stream
+	streams map[framing.StreamId]*stream
 
 	// Protects the data that both sending and receiving side uses,
 	// namely the streams and the close channel
@@ -27,9 +27,9 @@ type session struct {
 
 	// the maximum number of concurrent streams
 	maxStreams uint32
-	framer     *spdy.Framer
+	framer     *framing.Framer
 	conn       net.Conn
-	// buffered input output, since spdy.Framer does small writes.
+	// buffered input output, since the Framer does small writes.
 	br *bufio.Reader
 	bw *bufio.Writer
 
@@ -40,8 +40,8 @@ type session struct {
 
 	// channels to communicate between the 2 goroutines
 	// that make up the server.
-	pingch    chan *spdy.PingFrame
-	sendReset chan *spdy.RstStreamFrame
+	pingch    chan *framing.PingFrame
+	sendReset chan *framing.RstStreamFrame
 	windowOut chan windowupdate
 
 	// channel to bail out of the main event loop when closed
@@ -54,12 +54,12 @@ type session struct {
 	initialWindow uint32
 
 	// last received streamid from client
-	lastClientStream spdy.StreamId
+	lastClientStream framing.StreamId
 
 	// memory caches for commonly used frames
-	data   spdy.DataFrame
-	reply  spdy.SynReplyFrame
-	window spdy.WindowUpdateFrame
+	data   framing.DataFrame
+	reply  framing.SynReplyFrame
+	window framing.WindowUpdateFrame
 }
 
 // newSession initiates a SPDY session
@@ -70,19 +70,19 @@ func (ps *Server) newSession(c net.Conn) (*session, error) {
 		streamch:      make(chan streamWrite),
 		ackch:         make(chan rwAck),
 		finch:         make(chan *stream),
-		pingch:        make(chan *spdy.PingFrame, 1),
-		sendReset:     make(chan *spdy.RstStreamFrame, 1),
+		pingch:        make(chan *framing.PingFrame, 1),
+		sendReset:     make(chan *framing.RstStreamFrame, 1),
 		windowOut:     make(chan windowupdate, 10),
 		conn:          c,
 		server:        ps,
 		initialWindow: 64 << 10, // 64 kb
-		streams:       make(map[spdy.StreamId]*stream),
+		streams:       make(map[framing.StreamId]*stream),
 	}
 	s.br = bufio.NewReader(c)
 	s.bw = bufio.NewWriter(c)
 	s.conn = c
 
-	f, err := spdy.NewFramer(s.bw, s.br)
+	f, err := framing.NewFramer(s.bw, s.br)
 	if err != nil {
 		return nil, err
 	}
@@ -90,14 +90,14 @@ func (ps *Server) newSession(c net.Conn) (*session, error) {
 	return s, nil
 }
 
-func (s *session) getStream(id spdy.StreamId) (*stream, bool) {
+func (s *session) getStream(id framing.StreamId) (*stream, bool) {
 	s.mu.Lock()
 	str, ok := s.streams[id]
 	s.mu.Unlock()
 	return str, ok
 }
 
-func (s *session) putStream(id spdy.StreamId, str *stream) {
+func (s *session) putStream(id framing.StreamId, str *stream) {
 	s.mu.Lock()
 	s.streams[id] = str
 	s.mu.Unlock()
@@ -150,8 +150,8 @@ func (s *session) close() {
 }
 
 // sessionError causes a session error. It also closes the session.
-func (s *session) sessionError(status spdy.GoAwayStatus) {
-	goAway := spdy.GoAwayFrame{
+func (s *session) sessionError(status framing.GoAwayStatus) {
+	goAway := framing.GoAwayFrame{
 		LastGoodStreamId: s.lastClientStream,
 		Status:           status,
 	}
@@ -162,7 +162,7 @@ func (s *session) sessionError(status spdy.GoAwayStatus) {
 }
 
 // writeFrame writes a frame to the connection and flushes the outgoing buffered IO
-func (s *session) writeFrame(f spdy.Frame) error {
+func (s *session) writeFrame(f framing.Frame) error {
 	if d := s.server.WriteTimeout; d != 0 {
 		s.conn.SetWriteDeadline(time.Now().Add(d))
 	}
@@ -298,15 +298,15 @@ func (s *session) prioritize() chan streamWrite {
 }
 
 // makeSynReply builds a SynReply with a given header and streamid
-func makeSynReply(syn *spdy.SynReplyFrame, hdr http.Header, str *stream) {
+func makeSynReply(syn *framing.SynReplyFrame, hdr http.Header, str *stream) {
 	syn.StreamId = str.id
 	syn.CFHeader.Flags = 0
 	syn.Headers = hdr
 }
 
 // makefin builds a finalizing dataframe with the given StreamId
-func makeFin(d *spdy.DataFrame, id spdy.StreamId) {
-	d.Flags = spdy.DataFlagFin
+func makeFin(d *framing.DataFrame, id framing.StreamId) {
+	d.Flags = framing.DataFlagFin
 	d.StreamId = id
 	d.Data = nil
 }
@@ -328,19 +328,19 @@ func (s *session) readFrames() {
 }
 
 // dispatch figures out how to handle frames coming in from the client
-func (s *session) dispatch(f spdy.Frame) {
+func (s *session) dispatch(f framing.Frame) {
 	switch fr := f.(type) {
-	case *spdy.SettingsFrame:
+	case *framing.SettingsFrame:
 		s.handleSettings(fr)
-	case *spdy.SynStreamFrame:
+	case *framing.SynStreamFrame:
 		s.handleReq(fr)
-	case *spdy.RstStreamFrame:
+	case *framing.RstStreamFrame:
 		s.handleRst(fr)
-	case *spdy.PingFrame:
+	case *framing.PingFrame:
 		s.handlePing(fr)
-	case *spdy.WindowUpdateFrame:
+	case *framing.WindowUpdateFrame:
 		s.handleWindowUpdate(fr)
-	case *spdy.DataFrame:
+	case *framing.DataFrame:
 		s.handleData(fr)
 	default:
 		log.Println("unhandled frame", fr)
@@ -348,41 +348,41 @@ func (s *session) dispatch(f spdy.Frame) {
 }
 
 // handleSettings adjusts the internal session parameters to what the client has told us
-func (s *session) handleSettings(settings *spdy.SettingsFrame) {
+func (s *session) handleSettings(settings *framing.SettingsFrame) {
 	for _, flag := range settings.FlagIdValues {
 		switch flag.Id {
-		case spdy.SettingsUploadBandwidth,
-			spdy.SettingsDownloadBandwidth,
-			spdy.SettingsRoundTripTime,
-			spdy.SettingsCurrentCwnd,
-			spdy.SettingsDownloadRetransRate,
-			spdy.SettingsClientCretificateVectorSize:
+		case framing.SettingsUploadBandwidth,
+			framing.SettingsDownloadBandwidth,
+			framing.SettingsRoundTripTime,
+			framing.SettingsCurrentCwnd,
+			framing.SettingsDownloadRetransRate,
+			framing.SettingsClientCretificateVectorSize:
 			log.Printf("unsupported setting: %d", flag.Id)
-		case spdy.SettingsMaxConcurrentStreams:
+		case framing.SettingsMaxConcurrentStreams:
 			s.maxStreams = flag.Value
-		case spdy.SettingsInitialWindowSize:
+		case framing.SettingsInitialWindowSize:
 			s.initialWindow = flag.Value
 		}
 	}
 }
 
 // handleReq initiates a stream
-func (s *session) handleReq(syn *spdy.SynStreamFrame) {
+func (s *session) handleReq(syn *framing.SynStreamFrame) {
 	if s.lastClientStream == 0 {
 		if syn.StreamId != 1 {
-			s.sessionError(spdy.GoAwayProtocolError)
+			s.sessionError(framing.GoAwayProtocolError)
 			return
 		}
 		s.lastClientStream = 1
 	} else if syn.StreamId != s.lastClientStream+2 {
-		s.sessionError(spdy.GoAwayProtocolError)
+		s.sessionError(framing.GoAwayProtocolError)
 		return
 	} else {
 		s.lastClientStream += 2
 	}
 
 	if s.numStreams() == int(s.maxStreams) {
-		s.sendRst(syn.StreamId, spdy.RefusedStream)
+		s.sendRst(syn.StreamId, framing.RefusedStream)
 		return
 	}
 
@@ -391,7 +391,7 @@ func (s *session) handleReq(syn *spdy.SynStreamFrame) {
 	stream.handleReq(s.server.Handler, syn.Headers)
 }
 
-func (s *session) handleRst(rst *spdy.RstStreamFrame) {
+func (s *session) handleRst(rst *framing.RstStreamFrame) {
 	str, ok := s.getStream(rst.StreamId)
 	if !ok {
 		// stream no longer active.
@@ -400,14 +400,14 @@ func (s *session) handleRst(rst *spdy.RstStreamFrame) {
 	s.closeStream(str, true)
 }
 
-func (s *session) handlePing(ping *spdy.PingFrame) {
+func (s *session) handlePing(ping *framing.PingFrame) {
 	select {
 	case s.pingch <- ping:
 	case <-s.closech:
 	}
 }
 
-func (s *session) handleWindowUpdate(upd *spdy.WindowUpdateFrame) {
+func (s *session) handleWindowUpdate(upd *framing.WindowUpdateFrame) {
 	str, ok := s.getStream(upd.StreamId)
 	if !ok {
 		// received window update for closed stream
@@ -418,7 +418,7 @@ func (s *session) handleWindowUpdate(upd *spdy.WindowUpdateFrame) {
 	defer str.mu.Unlock()
 	newWindow := str.window + upd.DeltaWindowSize
 	if newWindow&1<<32 != 0 {
-		s.sendRst(str.id, spdy.FlowControlError)
+		s.sendRst(str.id, framing.FlowControlError)
 		return
 	}
 	str.window = newWindow
@@ -436,8 +436,8 @@ func (s *session) handleWindowUpdate(upd *spdy.WindowUpdateFrame) {
 
 }
 
-func (s *session) sendRst(id spdy.StreamId, status spdy.RstStreamStatus) {
-	f := &spdy.RstStreamFrame{
+func (s *session) sendRst(id framing.StreamId, status framing.RstStreamStatus) {
+	f := &framing.RstStreamFrame{
 		StreamId: id,
 		Status:   status,
 	}
@@ -453,13 +453,13 @@ func (s *session) sendRst(id spdy.StreamId, status spdy.RstStreamStatus) {
 
 type windowupdate struct {
 	d  int
-	id spdy.StreamId
+	id framing.StreamId
 }
 
-func (s *session) handleData(data *spdy.DataFrame) {
+func (s *session) handleData(data *framing.DataFrame) {
 	stream, ok := s.getStream(data.StreamId)
 	if !ok {
-		s.sendRst(data.StreamId, spdy.InvalidStream)
+		s.sendRst(data.StreamId, framing.InvalidStream)
 		return
 	}
 	// naive window logic. always try to keep the window at the default size.
@@ -471,12 +471,12 @@ func (s *session) handleData(data *spdy.DataFrame) {
 	stream.mu.Lock()
 	if stream.receivedFin {
 		stream.mu.Unlock()
-		s.sendRst(stream.id, spdy.StreamAlreadyClosed)
+		s.sendRst(stream.id, framing.StreamAlreadyClosed)
 		return
 	}
 
 	var err error
-	if data.Flags&spdy.DataFlagFin != 0 {
+	if data.Flags&framing.DataFlagFin != 0 {
 		err = io.EOF
 		stream.receivedFin = true
 	}
@@ -490,8 +490,8 @@ func (s *session) handleData(data *spdy.DataFrame) {
 		if sentFin {
 			// we're receiving data although we've sent a fin.
 			// In http, we'd read the entire thing, so that we can reuse the connection,
-			// but in the world of spdy we can tell the client to stop sending
-			s.sendRst(stream.id, spdy.Cancel)
+			// but in the world of framing.we can tell the client to stop sending
+			s.sendRst(stream.id, framing.Cancel)
 		}
 	}
 }

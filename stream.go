@@ -5,8 +5,8 @@ package spdy
 
 import (
 	"bufio"
-	"code.google.com/p/go.net/spdy"
 	"fmt"
+	"github.com/DanielMorsing/spdy/framing"
 	"io"
 	"io/ioutil"
 	"log"
@@ -18,7 +18,7 @@ import (
 // stream represents a spdy stream within a session
 type stream struct {
 	// the stream id for this stream
-	id spdy.StreamId
+	id framing.StreamId
 
 	// window size
 	window      uint32
@@ -37,7 +37,7 @@ type stream struct {
 	mu sync.Mutex
 }
 
-func newStream(sess *session, syn *spdy.SynStreamFrame) *stream {
+func newStream(sess *session, syn *framing.SynStreamFrame) *stream {
 	s := &stream{
 		id:       syn.StreamId,
 		priority: syn.Priority,
@@ -48,7 +48,7 @@ func newStream(sess *session, syn *spdy.SynStreamFrame) *stream {
 		wrch:     sess.streamch,
 		session:  sess,
 	}
-	if syn.CFHeader.Flags&spdy.ControlFlagFin != 0 {
+	if syn.CFHeader.Flags&framing.ControlFlagFin != 0 {
 		s.receivedFin = true
 	}
 	return s
@@ -188,7 +188,7 @@ func (str *stream) Write(b []byte) (int, error) {
 
 // builds a dataframe for the byte slice and updates the window.
 // if the window is empty, set the blocked field and return 0
-func (str *stream) buildDataframe(data *spdy.DataFrame, b []byte) int {
+func (str *stream) buildDataframe(data *framing.DataFrame, b []byte) int {
 	data.StreamId = str.id
 	data.Flags = 0
 	str.mu.Lock()

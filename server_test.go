@@ -7,10 +7,10 @@ package spdy_test
 
 import (
 	"bytes"
-	spdyf "code.google.com/p/go.net/spdy"
 	"crypto/tls"
 	"fmt"
 	"github.com/DanielMorsing/spdy"
+	"github.com/DanielMorsing/spdy/framing"
 	"net"
 	"net/http"
 	"testing"
@@ -71,12 +71,12 @@ var clientConfig = tls.Config{
 	NextProtos:         []string{"spdy/3"},
 }
 
-func newClientSession() (*spdyf.Framer, net.Conn) {
+func newClientSession() (*framing.Framer, net.Conn) {
 	n, err := net.Dial("tcp", "localhost:4444")
 	if err != nil {
 		panic(err)
 	}
-	framer, err := spdyf.NewFramer(n, n)
+	framer, err := framing.NewFramer(n, n)
 	if err != nil {
 		panic(err)
 	}
@@ -97,10 +97,10 @@ func goldenHeader() http.Header {
 	return m
 }
 
-func makeRequest() *spdyf.SynStreamFrame {
-	return &spdyf.SynStreamFrame{
-		spdyf.ControlFrameHeader{
-			Flags: spdyf.ControlFlagFin,
+func makeRequest() *framing.SynStreamFrame {
+	return &framing.SynStreamFrame{
+		framing.ControlFrameHeader{
+			Flags: framing.ControlFlagFin,
 		},
 		1,
 		0,
@@ -110,16 +110,16 @@ func makeRequest() *spdyf.SynStreamFrame {
 	}
 }
 
-func goldenSettings() *spdyf.SettingsFrame {
-	return &spdyf.SettingsFrame{
-		FlagIdValues: []spdyf.SettingsFlagIdValue{
-			spdyf.SettingsFlagIdValue{0, 4, 1000},
-			spdyf.SettingsFlagIdValue{0, 7, 10485760},
+func goldenSettings() *framing.SettingsFrame {
+	return &framing.SettingsFrame{
+		FlagIdValues: []framing.SettingsFlagIdValue{
+			framing.SettingsFlagIdValue{0, 4, 1000},
+			framing.SettingsFlagIdValue{0, 7, 10485760},
 		},
 	}
 }
 
-func frameRead(t *testing.T, f *spdyf.Framer) spdyf.Frame {
+func frameRead(t *testing.T, f *framing.Framer) framing.Frame {
 	frame, err := f.ReadFrame()
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func frameRead(t *testing.T, f *spdyf.Framer) spdyf.Frame {
 	return frame
 }
 
-func frameWrite(t *testing.T, f *spdyf.Framer, frame spdyf.Frame) {
+func frameWrite(t *testing.T, f *framing.Framer, frame framing.Frame) {
 	err := f.WriteFrame(frame)
 	if err != nil {
 		t.Fatal(err)
@@ -138,11 +138,11 @@ func TestPing(t *testing.T) {
 	f, n := newClientSession()
 	defer n.Close()
 
-	p := spdyf.PingFrame{Id: 1}
+	p := framing.PingFrame{Id: 1}
 	frameWrite(t, f, &p)
 
 	retf := frameRead(t, f)
-	if retp, ok := retf.(*spdyf.PingFrame); ok {
+	if retp, ok := retf.(*framing.PingFrame); ok {
 		if retp.Id != 1 {
 			t.Error("ping id returned is not the one sent")
 		}
@@ -169,7 +169,7 @@ func TestBasicRequest(t *testing.T) {
 	frameWrite(t, f, syn)
 
 	r := frameRead(t, f)
-	rp, ok := r.(*spdyf.SynReplyFrame)
+	rp, ok := r.(*framing.SynReplyFrame)
 	if !ok {
 		t.Fatal("did not get reply frame")
 	}
@@ -178,7 +178,7 @@ func TestBasicRequest(t *testing.T) {
 	}
 	for {
 		frame := frameRead(t, f)
-		d, ok := frame.(*spdyf.DataFrame)
+		d, ok := frame.(*framing.DataFrame)
 		if !ok {
 			t.Fatal("non data frame received")
 		}
@@ -199,13 +199,13 @@ func TestReset(t *testing.T) {
 	cork()
 	frameWrite(t, f, syn)
 	r := frameRead(t, f)
-	_, ok := r.(*spdyf.SynReplyFrame)
+	_, ok := r.(*framing.SynReplyFrame)
 	if !ok {
 		t.Fatal("did not get reply frame")
 	}
-	rst := spdyf.RstStreamFrame{
+	rst := framing.RstStreamFrame{
 		StreamId: 1,
-		Status:   spdyf.Cancel,
+		Status:   framing.Cancel,
 	}
 	frameWrite(t, f, &rst)
 
@@ -214,14 +214,14 @@ func TestReset(t *testing.T) {
 	// after a rst has been sent.
 	//
 	// make sure that reset has been received by sending a ping
-	p := spdyf.PingFrame{Id: 1}
+	p := framing.PingFrame{Id: 1}
 	frameWrite(t, f, &p)
 	retf := frameRead(t, f)
-	if _, ok := retf.(*spdyf.PingFrame); !ok {
+	if _, ok := retf.(*framing.PingFrame); !ok {
 		t.Error("Received non ping frame")
 	}
 
-	var ch = make(chan spdyf.Frame, 1)
+	var ch = make(chan framing.Frame, 1)
 	go func() {
 		for {
 			f, err := f.ReadFrame()
@@ -248,7 +248,7 @@ func TestWindowLimit(t *testing.T) {
 
 	set := goldenSettings()
 	for i := range set.FlagIdValues {
-		if set.FlagIdValues[i].Id == spdyf.SettingsInitialWindowSize {
+		if set.FlagIdValues[i].Id == framing.SettingsInitialWindowSize {
 			set.FlagIdValues[i].Value = 1
 		}
 	}
@@ -258,20 +258,20 @@ func TestWindowLimit(t *testing.T) {
 	frameWrite(t, f, syn)
 
 	frame := frameRead(t, f)
-	_, ok := frame.(*spdyf.SynReplyFrame)
+	_, ok := frame.(*framing.SynReplyFrame)
 	if !ok {
 		t.Fatal("did not get reply frame")
 	}
 
 	frame = frameRead(t, f)
-	d, ok := frame.(*spdyf.DataFrame)
+	d, ok := frame.(*framing.DataFrame)
 	if !ok {
 		t.Fatal("did not get data frame")
 	}
 	if len(d.Data) != 1 {
 		t.Fatal("Data frame larger than window")
 	}
-	var ch = make(chan spdyf.Frame, 1)
+	var ch = make(chan framing.Frame, 1)
 	go func() {
 		f := frameRead(t, f)
 		ch <- f
@@ -280,7 +280,7 @@ func TestWindowLimit(t *testing.T) {
 	case <-ch:
 		t.Error("got data even though it's supposed to be blocked on window")
 	case <-time.After(200 * time.Millisecond):
-		wnd := spdyf.WindowUpdateFrame{
+		wnd := framing.WindowUpdateFrame{
 			StreamId:        1,
 			DeltaWindowSize: 1 << 20,
 		}
@@ -299,7 +299,7 @@ func TestResetWhileWindowblocked(t *testing.T) {
 
 	set := goldenSettings()
 	for i := range set.FlagIdValues {
-		if set.FlagIdValues[i].Id == spdyf.SettingsInitialWindowSize {
+		if set.FlagIdValues[i].Id == framing.SettingsInitialWindowSize {
 			set.FlagIdValues[i].Value = 1
 		}
 	}
@@ -309,12 +309,12 @@ func TestResetWhileWindowblocked(t *testing.T) {
 	frameWrite(t, f, syn)
 
 	frame := frameRead(t, f)
-	_, ok := frame.(*spdyf.SynReplyFrame)
+	_, ok := frame.(*framing.SynReplyFrame)
 	if !ok {
 		t.Fatal("did not get reply frame")
 	}
 	frame = frameRead(t, f)
-	d, ok := frame.(*spdyf.DataFrame)
+	d, ok := frame.(*framing.DataFrame)
 	if !ok {
 		t.Fatal("did not get data frame")
 	}
@@ -322,7 +322,7 @@ func TestResetWhileWindowblocked(t *testing.T) {
 		t.Fatal("Data frame larger than window")
 	}
 
-	var ch = make(chan spdyf.Frame, 1)
+	var ch = make(chan framing.Frame, 1)
 	go func() {
 		f, _ := f.ReadFrame()
 		ch <- f
@@ -331,9 +331,9 @@ func TestResetWhileWindowblocked(t *testing.T) {
 	case <-ch:
 		t.Error("got data even though it's supposed to be blocked on window")
 	case <-time.After(200 * time.Millisecond):
-		rst := spdyf.RstStreamFrame{
+		rst := framing.RstStreamFrame{
 			StreamId: 1,
-			Status:   spdyf.Cancel,
+			Status:   framing.Cancel,
 		}
 		frameWrite(t, f, &rst)
 	}
@@ -351,14 +351,14 @@ func TestPostRequest(t *testing.T) {
 	syn.Headers["Content-Type"] = []string{"application/x-www-form-urlencoded"}
 	syn.CFHeader.Flags = 0
 	frameWrite(t, f, syn)
-	d := &spdyf.DataFrame{}
+	d := &framing.DataFrame{}
 	d.StreamId = 1
-	d.Flags = spdyf.DataFlagFin
+	d.Flags = framing.DataFlagFin
 	d.Data = []byte("firstname=daniel&lastname=morsing")
 	frameWrite(t, f, d)
 
 	r := frameRead(t, f)
-	rp, ok := r.(*spdyf.SynReplyFrame)
+	rp, ok := r.(*framing.SynReplyFrame)
 	if !ok {
 		t.Fatal("did not get reply frame")
 	}
@@ -367,7 +367,7 @@ func TestPostRequest(t *testing.T) {
 	}
 
 	frame := frameRead(t, f)
-	d, ok = frame.(*spdyf.DataFrame)
+	d, ok = frame.(*framing.DataFrame)
 	if !ok {
 		t.Fatal("non data frame received:", frame)
 	}
@@ -386,13 +386,13 @@ func TestInvalidStreamId(t *testing.T) {
 
 	frameWrite(t, f, syn)
 	goaway := frameRead(t, f)
-	g, ok := goaway.(*spdyf.GoAwayFrame)
+	g, ok := goaway.(*framing.GoAwayFrame)
 	if !ok {
 		// didn't get reset
 		t.Errorf("did not get goaway frame. got %T instead", g)
 		return
 	}
-	if g.Status != spdyf.GoAwayProtocolError {
+	if g.Status != framing.GoAwayProtocolError {
 		t.Error("Wrong error code")
 	}
 	_, err := f.ReadFrame()
