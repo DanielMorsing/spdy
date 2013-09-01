@@ -401,6 +401,10 @@ func (s *session) handleRst(rst *spdy.RstStreamFrame) {
 }
 
 func (s *session) handlePing(ping *spdy.PingFrame) {
+	if ping.Id%2 == 0 {
+		// server ping from client, spec says ignore.
+		return
+	}
 	select {
 	case s.pingch <- ping:
 	case <-s.closech:
