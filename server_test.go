@@ -120,11 +120,16 @@ func goldenSettings() *spdyf.SettingsFrame {
 }
 
 func frameRead(t *testing.T, f *spdyf.Framer) spdyf.Frame {
-	frame, err := f.ReadFrame()
-	if err != nil {
-		t.Fatal(err)
+	for {
+		frame, err := f.ReadFrame()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := frame.(*spdyf.WindowUpdateFrame); !ok {
+			return frame
+		}
 	}
-	return frame
+
 }
 
 func frameWrite(t *testing.T, f *spdyf.Framer, frame spdyf.Frame) {
