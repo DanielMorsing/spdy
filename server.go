@@ -168,8 +168,9 @@ func (nl *negotiateListen) Accept() (net.Conn, error) {
 		case "http/1.1", "":
 			if nl.httpch != nil {
 				nl.httpch <- c
+				continue
 			}
-			continue
+			fallthrough
 		default:
 			// unsupported protocol
 			c.Close()
