@@ -324,6 +324,9 @@ func (rw *responseWriter) sendAck(hdr http.Header) {
 
 // closes stream. Sends a data frame with the Fin flag set
 func (rw *responseWriter) close() error {
+	if !rw.headerWritten {
+		rw.WriteHeader(http.StatusOK)
+	}
 	rw.bufw.Flush()
 	if rw.isClosed() {
 		return nil
