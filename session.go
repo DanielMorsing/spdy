@@ -110,6 +110,8 @@ func (s *session) numStreams() int {
 	return l
 }
 
+// closeStream closes a stream and removes it from the map if both ends have been closed.
+// if the closing operation was caused by a reset, just remove the stream, regardless of state.
 func (s *session) closeStream(str *stream, isReset bool) {
 	s.mu.Lock()
 	str.mu.Lock()
@@ -429,8 +431,8 @@ func (s *session) handleWindowUpdate(upd *spdy.WindowUpdateFrame) {
 	if str.blocked {
 		// the stream can only be blocked when it has sent
 		// a write request and is ready to receive an error.
-		// Framer is being written to by another goroutine,
-		// so tell the responseWriter to restart the write.
+		// Framer is written to by another goroutine,
+		// so tell the stream to restart the write.
 		str.blocked = false
 		select {
 		case str.retch <- 0:

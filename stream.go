@@ -188,6 +188,7 @@ func (str *stream) Write(b []byte) (int, error) {
 
 // builds a dataframe for the byte slice and updates the window.
 // if the window is empty, set the blocked field and return 0
+// this function is called from the session goroutine.
 func (str *stream) buildDataframe(data *spdy.DataFrame, b []byte) int {
 	data.StreamId = str.id
 	data.Flags = 0
@@ -205,6 +206,8 @@ func (str *stream) buildDataframe(data *spdy.DataFrame, b []byte) int {
 	return len(b)
 }
 
+// responseWriter is the type passed to the request handler.
+// it is only touched by the handling goroutine.
 type responseWriter struct {
 	stream        *stream
 	headerWritten bool

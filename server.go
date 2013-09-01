@@ -10,7 +10,7 @@
 // The HTTPS fallback feature can be disabled by providing a TLS config which does not include
 // http/1.1 in its valid NPN protocols.
 //
-// TODO: Server Push, Client Certificate validation, Stream priority, Receive window
+// TODO: Server Push, Client Certificate validation
 package spdy
 
 import (
@@ -143,6 +143,8 @@ func (srv *Server) negotiateListen(addr string, httpAvail bool) (net.Listener, e
 	return ngl, nil
 }
 
+// negotiateListen is a listener that negotiates spdy connections.
+// if http is enabled, it will forward the connection to the fallback server
 type negotiateListen struct {
 	net.Listener
 	httpch chan net.Conn
