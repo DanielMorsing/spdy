@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"github.com/DanielMorsing/spdy"
 	"github.com/DanielMorsing/spdy/framing"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"testing"
@@ -120,11 +121,16 @@ func goldenSettings() *framing.SettingsFrame {
 }
 
 func frameRead(t *testing.T, f *framing.Framer) framing.Frame {
-	frame, err := f.ReadFrame()
-	if err != nil {
-		t.Fatal(err)
+	for {
+		frame, err := f.ReadFrame()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := frame.(*framing.WindowUpdateFrame); !ok {
+			return frame
+		}
 	}
-	return frame
+
 }
 
 func frameWrite(t *testing.T, f *framing.Framer, frame framing.Frame) {
@@ -178,10 +184,11 @@ func TestBasicRequest(t *testing.T) {
 	}
 	for {
 		frame := frameRead(t, f)
-		d, ok := frame.(*framing.DataFrame)
+		d, ok := frame.(*framing.InDataFrame)
 		if !ok {
-			t.Fatal("non data frame received")
+			t.Fatalf("non data frame received: %T", frame)
 		}
+		d.Close()
 		// got fin
 		if d.Flags != 0 {
 			break
@@ -264,11 +271,12 @@ func TestWindowLimit(t *testing.T) {
 	}
 
 	frame = frameRead(t, f)
-	d, ok := frame.(*framing.DataFrame)
+	d, ok := frame.(*framing.InDataFrame)
 	if !ok {
 		t.Fatal("did not get data frame")
 	}
-	if len(d.Data) != 1 {
+	d.Close()
+	if d.Length != 1 {
 		t.Fatal("Data frame larger than window")
 	}
 	var ch = make(chan framing.Frame, 1)
@@ -314,11 +322,12 @@ func TestResetWhileWindowblocked(t *testing.T) {
 		t.Fatal("did not get reply frame")
 	}
 	frame = frameRead(t, f)
-	d, ok := frame.(*framing.DataFrame)
+	d, ok := frame.(*framing.InDataFrame)
 	if !ok {
 		t.Fatal("did not get data frame")
 	}
-	if len(d.Data) != 1 {
+	d.Close()
+	if d.Length != 1 {
 		t.Fatal("Data frame larger than window")
 	}
 
@@ -360,19 +369,24 @@ func TestPostRequest(t *testing.T) {
 	r := frameRead(t, f)
 	rp, ok := r.(*framing.SynReplyFrame)
 	if !ok {
-		t.Fatal("did not get reply frame")
+		t.Fatalf("did not get reply frame: %T", r)
 	}
 	if rp.StreamId != 1 {
 		t.Fatal("Wrong StreamId")
 	}
 
 	frame := frameRead(t, f)
-	d, ok = frame.(*framing.DataFrame)
+	id, ok := frame.(*framing.InDataFrame)
 	if !ok {
 		t.Fatal("non data frame received:", frame)
 	}
+	got, err := ioutil.ReadAll(id)
+	id.Close()
+	if err != nil {
+		t.Error(err)
+	}
 	exp := []byte("your name is daniel morsing\n")
-	if !bytes.Equal(d.Data, exp) {
+	if !bytes.Equal(got, exp) {
 		t.Errorf("expected %s; got %s", exp, d.Data)
 	}
 }

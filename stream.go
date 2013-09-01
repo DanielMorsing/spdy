@@ -26,7 +26,7 @@ type stream struct {
 	reset       chan error
 	wrch        chan streamWrite
 	retch       chan int
-	readch      chan rwRead
+	readch      chan *framing.InDataFrame
 	session     *session
 	receivedFin bool
 	sentFin     bool
@@ -44,7 +44,7 @@ func newStream(sess *session, syn *framing.SynStreamFrame) *stream {
 		window:   sess.initialWindow,
 		reset:    make(chan error),
 		retch:    make(chan int),
-		readch:   make(chan rwRead),
+		readch:   make(chan *framing.InDataFrame),
 		wrch:     sess.streamch,
 		session:  sess,
 	}
@@ -214,10 +214,11 @@ type responseWriter struct {
 
 	reset chan error
 
-	readch  chan rwRead
-	left    []byte
-	readerr error
-	eof     bool
+	readch    chan *framing.InDataFrame
+	left      []byte
+	readerr   error
+	eof       bool
+	currFrame *framing.InDataFrame
 
 	// channels to send header
 	ackch  chan rwAck
@@ -261,48 +262,35 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.headerWritten = true
 }
 
-type rwRead struct {
-	b   []byte
-	err error
-}
-
 func (rw *responseWriter) Read(b []byte) (int, error) {
-	// Subtle code alert.
-	// if we get a bigger frame than the b passed,
-	// put the remainder in left and defer the error until
-	// we've read it all.
 	if rw.eof || rw.isClosed() {
 		return 0, io.EOF
 	}
-	if rw.left != nil {
-		n := copy(b, rw.left)
-		if n == len(rw.left) {
-			rw.left = nil
-			err := rw.readerr
-			if err == io.EOF {
-				rw.eof = true
-			}
-			return n, err
-		}
-		rw.left = rw.left[n:]
-		return n, nil
+	if rw.currFrame != nil {
+		return rw.readfromframe(b)
 	}
 	select {
+	case d := <-rw.readch:
+		rw.currFrame = d
+		return rw.readfromframe(b)
 	case <-rw.reset:
-		rw.closed = true
-		return 0, io.EOF
-	case read := <-rw.readch:
-		n := copy(b, read.b)
-		if n == len(read.b) {
-			if read.err == io.EOF {
-				rw.eof = true
-			}
-			return n, read.err
-		}
-		rw.left = read.b[n:]
-		rw.readerr = read.err
-		return n, nil
+		return 0, io.ErrClosedPipe
 	}
+}
+
+func (rw *responseWriter) readfromframe(b []byte) (int, error) {
+	n, err := rw.currFrame.Read(b)
+	if err == io.EOF {
+		rw.currFrame.Close()
+		err = nil
+		if rw.currFrame.Flags&framing.DataFlagFin != 0 {
+			rw.eof = true
+			err = io.EOF
+		}
+		rw.currFrame = nil
+		return n, err
+	}
+	return n, err
 }
 
 type rwAck struct {

@@ -11,6 +11,7 @@ import (
 	"compress/zlib"
 	"io"
 	"net/http"
+	"sync"
 )
 
 // Version is the protocol version number that this package implements.
@@ -203,6 +204,15 @@ type DataFrame struct {
 	Data     []byte // payload data of this frame
 }
 
+type InDataFrame struct {
+	StreamId StreamId
+	Flags    DataFlags
+	Length   uint32
+
+	io.Reader
+	mu *sync.Mutex
+}
+
 // A SPDY specific error.
 type ErrorCode string
 
@@ -253,6 +263,7 @@ type Framer struct {
 	r                         io.Reader
 	headerReader              io.LimitedReader
 	headerDecompressor        io.ReadCloser
+	mu                        sync.Mutex
 }
 
 // NewFramer allocates a new Framer for a given SPDY connection, repesented by

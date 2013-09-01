@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"container/heap"
 	"github.com/DanielMorsing/spdy/framing"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -142,7 +141,11 @@ func (s *session) close() {
 		close(s.closech)
 	}
 	for _, str := range s.streams {
-		close(str.reset)
+		select {
+		case <-str.reset:
+		default:
+			close(str.reset)
+		}
 	}
 
 	s.bw.Flush()
@@ -340,7 +343,7 @@ func (s *session) dispatch(f framing.Frame) {
 		s.handlePing(fr)
 	case *framing.WindowUpdateFrame:
 		s.handleWindowUpdate(fr)
-	case *framing.DataFrame:
+	case *framing.InDataFrame:
 		s.handleData(fr)
 	default:
 		log.Println("unhandled frame", fr)
@@ -456,42 +459,47 @@ type windowupdate struct {
 	id framing.StreamId
 }
 
-func (s *session) handleData(data *framing.DataFrame) {
+func (s *session) handleData(data *framing.InDataFrame) {
 	stream, ok := s.getStream(data.StreamId)
 	if !ok {
 		s.sendRst(data.StreamId, framing.InvalidStream)
-		return
-	}
-	// naive window logic. always try to keep the window at the default size.
-	select {
-	case s.windowOut <- windowupdate{len(data.Data), data.StreamId}:
-	case <-stream.reset:
+		err := data.Close()
+		if err != nil {
+			s.close()
+			return
+		}
 		return
 	}
 	stream.mu.Lock()
 	if stream.receivedFin {
 		stream.mu.Unlock()
 		s.sendRst(stream.id, framing.StreamAlreadyClosed)
+		err := data.Close()
+		if err != nil {
+			s.close()
+			return
+		}
 		return
 	}
 
-	var err error
-	if data.Flags&framing.DataFlagFin != 0 {
-		err = io.EOF
-		stream.receivedFin = true
-	}
 	stream.mu.Unlock()
+
+	wu := windowupdate{
+		int(data.Length),
+		data.StreamId,
+	}
 	select {
-	case stream.readch <- rwRead{data.Data, err}:
+	case s.windowOut <- wu:
+	case <-s.closech:
+		return
+	}
+	select {
+	case stream.readch <- data:
 	case <-stream.reset:
-		stream.mu.Lock()
-		sentFin := stream.sentFin
-		stream.mu.Unlock()
-		if sentFin {
-			// we're receiving data although we've sent a fin.
-			// In http, we'd read the entire thing, so that we can reuse the connection,
-			// but in the world of framing.we can tell the client to stop sending
-			s.sendRst(stream.id, framing.Cancel)
+		err := data.Close()
+		if err != nil {
+			s.close()
+			return
 		}
 	}
 }

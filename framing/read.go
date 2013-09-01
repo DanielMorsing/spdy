@@ -8,6 +8,7 @@ import (
 	"compress/zlib"
 	"encoding/binary"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"strings"
 )
@@ -144,14 +145,18 @@ func (f *Framer) uncorkHeaderDecompressor(payloadSize int64) error {
 
 // ReadFrame reads SPDY encoded data and returns a decompressed Frame.
 func (f *Framer) ReadFrame() (Frame, error) {
+	f.mu.Lock()
 	var firstWord uint32
 	if err := binary.Read(f.r, binary.BigEndian, &firstWord); err != nil {
+		f.mu.Unlock()
 		return nil, err
 	}
 	if firstWord&0x80000000 != 0 {
 		frameType := ControlFrameType(firstWord & 0xffff)
 		version := uint16(firstWord >> 16 & 0x7fff)
-		return f.parseControlFrame(version, frameType)
+		frame, err := f.parseControlFrame(version, frameType)
+		f.mu.Unlock()
+		return frame, err
 	}
 	return f.parseDataFrame(StreamId(firstWord & 0x7fffffff))
 }
@@ -328,21 +333,28 @@ func (f *Framer) readHeadersFrame(h ControlFrameHeader, frame *HeadersFrame) err
 	return nil
 }
 
-func (f *Framer) parseDataFrame(streamId StreamId) (*DataFrame, error) {
+func (f *Framer) parseDataFrame(streamId StreamId) (*InDataFrame, error) {
 	var length uint32
 	if err := binary.Read(f.r, binary.BigEndian, &length); err != nil {
+		f.mu.Unlock()
 		return nil, err
 	}
-	var frame DataFrame
+	var frame InDataFrame
 	frame.StreamId = streamId
 	frame.Flags = DataFlags(length >> 24)
 	length &= 0xffffff
-	frame.Data = make([]byte, length)
-	if _, err := io.ReadFull(f.r, frame.Data); err != nil {
-		return nil, err
-	}
+	frame.Length = length
+	frame.mu = &f.mu
+	frame.Reader = io.LimitReader(f.r, int64(length))
 	if frame.StreamId == 0 {
+		frame.Close()
 		return nil, &Error{ZeroStreamId, 0}
 	}
 	return &frame, nil
+}
+
+func (i *InDataFrame) Close() error {
+	_, err := io.Copy(ioutil.Discard, i.Reader)
+	i.mu.Unlock()
+	return err
 }

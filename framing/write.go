@@ -133,6 +133,10 @@ func (frame *DataFrame) write(f *Framer) error {
 	return f.writeDataFrame(frame)
 }
 
+func (frame *InDataFrame) write(f *Framer) error {
+	panic("InDataFrame written to the wire")
+}
+
 // WriteFrame writes a frame.
 func (f *Framer) WriteFrame(frame Frame) error {
 	return frame.write(f)
