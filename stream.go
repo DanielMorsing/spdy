@@ -33,7 +33,7 @@ type stream struct {
 	sentFin       bool
 	blocked       bool
 	closed        bool
-	buf           *bytes.Buffer
+	buf           bytes.Buffer
 	cond          *sync.Cond
 
 	// mutex to protect the window variable
@@ -54,8 +54,6 @@ func newStream(sess *session, syn *framing.SynStreamFrame) *stream {
 	s.cond = sync.NewCond(&s.mu)
 	if syn.CFHeader.Flags&framing.ControlFlagFin != 0 {
 		s.receivedFin = true
-	} else {
-		s.buf = bytes.NewBuffer(make([]byte, 0, s.receiveWindow))
 	}
 	return s
 

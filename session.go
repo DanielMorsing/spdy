@@ -491,8 +491,8 @@ func (s *session) readData(stream *stream, data *framing.InDataFrame) error {
 		s.sendRst(stream.id, framing.FlowControlError)
 		return nil
 	}
+	stream.buf.Grow(int(stream.receiveWindow))
 	stream.receiveWindow -= data.Length
-	stream.buf.Grow(int(data.Length))
 	_, err := stream.buf.ReadFrom(data)
 	if err != nil {
 		return err
