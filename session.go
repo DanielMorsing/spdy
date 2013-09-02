@@ -50,7 +50,8 @@ type session struct {
 	server *Server
 
 	// the initial window size that streams should be created with
-	initialWindow uint32
+	initialSendWindow uint32
+	receiveWindow     uint32
 
 	// last received streamid from client
 	lastClientStream framing.StreamId
@@ -64,18 +65,19 @@ type session struct {
 // newSession initiates a SPDY session
 func (ps *Server) newSession(c net.Conn) (*session, error) {
 	s := &session{
-		maxStreams:    100,
-		closech:       make(chan struct{}),
-		streamch:      make(chan streamWrite),
-		ackch:         make(chan rwAck),
-		finch:         make(chan *stream),
-		pingch:        make(chan *framing.PingFrame, 1),
-		sendReset:     make(chan *framing.RstStreamFrame, 1),
-		windowOut:     make(chan windowupdate, 10),
-		conn:          c,
-		server:        ps,
-		initialWindow: 64 << 10, // 64 kb
-		streams:       make(map[framing.StreamId]*stream),
+		maxStreams:        100,
+		closech:           make(chan struct{}),
+		streamch:          make(chan streamWrite),
+		ackch:             make(chan rwAck),
+		finch:             make(chan *stream),
+		pingch:            make(chan *framing.PingFrame, 1),
+		sendReset:         make(chan *framing.RstStreamFrame, 1),
+		windowOut:         make(chan windowupdate, 10),
+		conn:              c,
+		server:            ps,
+		initialSendWindow: 64 << 10, // 64 kb
+		receiveWindow:     64 << 10,
+		streams:           make(map[framing.StreamId]*stream),
 	}
 	s.br = bufio.NewReader(c)
 	s.bw = bufio.NewWriter(c)
@@ -364,7 +366,7 @@ func (s *session) handleSettings(settings *framing.SettingsFrame) {
 		case framing.SettingsMaxConcurrentStreams:
 			s.maxStreams = flag.Value
 		case framing.SettingsInitialWindowSize:
-			s.initialWindow = flag.Value
+			s.initialSendWindow = flag.Value
 		}
 	}
 }
@@ -419,12 +421,12 @@ func (s *session) handleWindowUpdate(upd *framing.WindowUpdateFrame) {
 	}
 	str.mu.Lock()
 	defer str.mu.Unlock()
-	newWindow := str.window + upd.DeltaWindowSize
+	newWindow := str.sendWindow + upd.DeltaWindowSize
 	if newWindow&1<<32 != 0 {
 		s.sendRst(str.id, framing.FlowControlError)
 		return
 	}
-	str.window = newWindow
+	str.sendWindow = newWindow
 	if str.blocked {
 		// the stream can only be blocked when it has sent
 		// a write request and is ready to receive an error.
@@ -454,11 +456,6 @@ func (s *session) sendRst(id framing.StreamId, status framing.RstStreamStatus) {
 	}
 }
 
-type windowupdate struct {
-	d  int
-	id framing.StreamId
-}
-
 func (s *session) handleData(data *framing.InDataFrame) {
 	stream, ok := s.getStream(data.StreamId)
 	if !ok {
@@ -470,36 +467,38 @@ func (s *session) handleData(data *framing.InDataFrame) {
 		}
 		return
 	}
+	err := s.readData(stream, data)
+	if err != nil {
+		s.close()
+		return
+	}
+	err = data.Close()
+	if err != nil {
+		s.close()
+	}
+
+}
+
+func (s *session) readData(stream *stream, data *framing.InDataFrame) error {
 	stream.mu.Lock()
 	if stream.receivedFin {
 		stream.mu.Unlock()
 		s.sendRst(stream.id, framing.StreamAlreadyClosed)
-		err := data.Close()
-		if err != nil {
-			s.close()
-			return
-		}
-		return
+		return nil
 	}
-
+	if data.Length > stream.receiveWindow {
+		stream.mu.Unlock()
+		s.sendRst(stream.id, framing.FlowControlError)
+		return nil
+	}
+	stream.receiveWindow -= data.Length
+	stream.buf.Grow(int(data.Length))
+	_, err := stream.buf.ReadFrom(data)
+	if err != nil {
+		return err
+	}
+	stream.receivedFin = data.Flags&framing.DataFlagFin != 0
 	stream.mu.Unlock()
-
-	wu := windowupdate{
-		int(data.Length),
-		data.StreamId,
-	}
-	select {
-	case s.windowOut <- wu:
-	case <-s.closech:
-		return
-	}
-	select {
-	case stream.readch <- data:
-	case <-stream.reset:
-		err := data.Close()
-		if err != nil {
-			s.close()
-			return
-		}
-	}
+	stream.cond.Signal()
+	return nil
 }
