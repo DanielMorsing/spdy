@@ -5,8 +5,9 @@ package spdy
 
 import (
 	"bufio"
-	"code.google.com/p/go.net/spdy"
+	"bytes"
 	"fmt"
+	"github.com/DanielMorsing/spdy/framing"
 	"io"
 	"io/ioutil"
 	"log"
@@ -18,37 +19,40 @@ import (
 // stream represents a spdy stream within a session
 type stream struct {
 	// the stream id for this stream
-	id spdy.StreamId
+	id framing.StreamId
 
 	// window size
-	window      uint32
-	priority    uint8
-	reset       chan error
-	wrch        chan streamWrite
-	retch       chan int
-	readch      chan rwRead
-	session     *session
-	receivedFin bool
-	sentFin     bool
-	blocked     bool
-	closed      bool
+	sendWindow    uint32
+	receiveWindow uint32
+	priority      uint8
+	reset         chan error
+	wrch          chan streamWrite
+	retch         chan int
+	session       *session
+	receivedFin   bool
+	sentFin       bool
+	blocked       bool
+	closed        bool
+	buf           bytes.Buffer
+	cond          *sync.Cond
 
 	// mutex to protect the window variable
 	mu sync.Mutex
 }
 
-func newStream(sess *session, syn *spdy.SynStreamFrame) *stream {
+func newStream(sess *session, syn *framing.SynStreamFrame) *stream {
 	s := &stream{
-		id:       syn.StreamId,
-		priority: syn.Priority,
-		window:   sess.initialWindow,
-		reset:    make(chan error),
-		retch:    make(chan int),
-		readch:   make(chan rwRead),
-		wrch:     sess.streamch,
-		session:  sess,
+		id:            syn.StreamId,
+		priority:      syn.Priority,
+		sendWindow:    sess.initialSendWindow,
+		receiveWindow: sess.receiveWindow,
+		reset:         make(chan error),
+		retch:         make(chan int),
+		wrch:          sess.streamch,
+		session:       sess,
 	}
-	if syn.CFHeader.Flags&spdy.ControlFlagFin != 0 {
+	s.cond = sync.NewCond(&s.mu)
+	if syn.CFHeader.Flags&framing.ControlFlagFin != 0 {
 		s.receivedFin = true
 	}
 	return s
@@ -73,14 +77,13 @@ func (str *stream) handleReq(hnd http.Handler, hdr http.Header) {
 	rw := responseWriter{
 		stream: str,
 		header: make(http.Header),
-		readch: str.readch,
 		ackch:  str.session.ackch,
 		finch:  str.session.finch,
 		reset:  str.reset,
 	}
 	rw.bufw = bufio.NewWriter(str)
 	if !str.receivedFin {
-		req.Body = ioutil.NopCloser(&rw)
+		req.Body = ioutil.NopCloser(str)
 	}
 	go func() {
 		hnd.ServeHTTP(&rw, req)
@@ -186,22 +189,59 @@ func (str *stream) Write(b []byte) (int, error) {
 	return n, err
 }
 
+type windowupdate struct {
+	d  int
+	id framing.StreamId
+}
+
+func (str *stream) Read(b []byte) (int, error) {
+	str.mu.Lock()
+	defer str.mu.Unlock()
+	for {
+		n, err := str.buf.Read(b)
+		if err != io.EOF {
+			select {
+			case str.session.windowOut <- windowupdate{n, str.id}:
+				str.receiveWindow += uint32(n)
+			case <-str.reset:
+				return n, io.ErrClosedPipe
+			}
+			return n, err
+		}
+		if str.receivedFin {
+			return n, err
+		}
+		gotNew := make(chan struct{}, 1)
+		go func() {
+			str.cond.Wait()
+			gotNew <- struct{}{}
+		}()
+		select {
+		case <-gotNew:
+		case <-str.reset:
+			// make sure we don't leave a goroutine around
+			str.cond.Signal()
+			return 0, io.ErrClosedPipe
+		}
+	}
+}
+
 // builds a dataframe for the byte slice and updates the window.
 // if the window is empty, set the blocked field and return 0
 // this function is called from the session goroutine.
-func (str *stream) buildDataframe(data *spdy.DataFrame, b []byte) int {
+func (str *stream) buildDataframe(data *framing.DataFrame, b []byte) int {
 	data.StreamId = str.id
 	data.Flags = 0
 	str.mu.Lock()
 	defer str.mu.Unlock()
-	if str.window == 0 {
+	if str.sendWindow == 0 {
 		str.blocked = true
 		return 0
 	}
-	if len(b) > int(str.window) {
-		b = b[:str.window]
+	if len(b) > int(str.sendWindow) {
+		b = b[:str.sendWindow]
 	}
-	str.window -= uint32(len(b))
+	str.sendWindow -= uint32(len(b))
 	data.Data = b
 	return len(b)
 }
@@ -216,11 +256,6 @@ type responseWriter struct {
 	bufw *bufio.Writer
 
 	reset chan error
-
-	readch  chan rwRead
-	left    []byte
-	readerr error
-	eof     bool
 
 	// channels to send header
 	ackch  chan rwAck
@@ -262,50 +297,6 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.header.Set(":version", "HTTP/1.1")
 	rw.sendAck(rw.header)
 	rw.headerWritten = true
-}
-
-type rwRead struct {
-	b   []byte
-	err error
-}
-
-func (rw *responseWriter) Read(b []byte) (int, error) {
-	// Subtle code alert.
-	// if we get a bigger frame than the b passed,
-	// put the remainder in left and defer the error until
-	// we've read it all.
-	if rw.eof || rw.isClosed() {
-		return 0, io.EOF
-	}
-	if rw.left != nil {
-		n := copy(b, rw.left)
-		if n == len(rw.left) {
-			rw.left = nil
-			err := rw.readerr
-			if err == io.EOF {
-				rw.eof = true
-			}
-			return n, err
-		}
-		rw.left = rw.left[n:]
-		return n, nil
-	}
-	select {
-	case <-rw.reset:
-		rw.closed = true
-		return 0, io.EOF
-	case read := <-rw.readch:
-		n := copy(b, read.b)
-		if n == len(read.b) {
-			if read.err == io.EOF {
-				rw.eof = true
-			}
-			return n, read.err
-		}
-		rw.left = read.b[n:]
-		rw.readerr = read.err
-		return n, nil
-	}
 }
 
 type rwAck struct {
