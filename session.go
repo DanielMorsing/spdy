@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const noGoAway framing.GoAwayStatus = 0xff
+
 // session represents a spdy session
 type session struct {
 	// a map of active streams. If a stream has been closed on both ends
@@ -135,7 +137,7 @@ func (s *session) closeStream(str *stream, isReset bool) {
 }
 
 // close shuts down the session and closes all the streams.
-func (s *session) close() {
+func (s *session) close(status framing.GoAwayStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	select {
@@ -152,20 +154,19 @@ func (s *session) close() {
 		}
 	}
 
-	s.bw.Flush()
-	s.conn.Close()
-}
-
-// sessionError causes a session error. It also closes the session.
-func (s *session) sessionError(status framing.GoAwayStatus) {
-	goAway := framing.GoAwayFrame{
-		LastGoodStreamId: s.lastClientStream,
-		Status:           status,
+	if status != noGoAway {
+		goAway := framing.GoAwayFrame{
+			LastGoodStreamId: s.lastClientStream,
+			Status:           status,
+		}
+		// we're going to die after this send.
+		// no reason to check the error
+		// also we can't be blocked on this, so give timeout.
+		s.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		s.framer.WriteFrame(&goAway)
+		s.bw.Flush()
 	}
-	// we're going to die after this send.
-	// no reason to check the error
-	s.writeFrame(&goAway)
-	s.close()
+	s.conn.Close()
 }
 
 // writeFrame writes a frame to the connection and flushes the outgoing buffered IO
@@ -175,9 +176,16 @@ func (s *session) writeFrame(f framing.Frame) error {
 	}
 	err := s.framer.WriteFrame(f)
 	if err != nil {
+		// error on write, can't send anything, so just close without sending goaway
+		s.close(noGoAway)
 		return err
 	}
-	return s.bw.Flush()
+	err = s.bw.Flush()
+	if err != nil {
+		s.close(noGoAway)
+		return err
+	}
+	return nil
 }
 
 // serve handles events coming from the various streams.
@@ -194,7 +202,6 @@ func (s *session) serve() {
 			}
 			err := s.writeFrame(&s.data)
 			if err != nil {
-				s.close()
 				return
 			}
 			select {
@@ -205,27 +212,23 @@ func (s *session) serve() {
 			makeSynReply(&s.reply, syn.hdr, syn.str)
 			err := s.writeFrame(&s.reply)
 			if err != nil {
-				s.close()
 				return
 			}
 		case fin := <-s.finch:
 			makeFin(&s.data, fin.id)
 			err := s.writeFrame(&s.data)
 			if err != nil {
-				s.close()
 				return
 			}
 			s.closeStream(fin, false)
 		case f := <-s.pingch:
 			err := s.writeFrame(f)
 			if err != nil {
-				s.close()
 				return
 			}
 		case f := <-s.sendReset:
 			err := s.writeFrame(f)
 			if err != nil {
-				s.close()
 				return
 			}
 		case wo := <-s.windowOut:
@@ -233,7 +236,6 @@ func (s *session) serve() {
 			s.window.DeltaWindowSize = uint32(wo.d)
 			err := s.writeFrame(&s.window)
 			if err != nil {
-				s.close()
 				return
 			}
 		case <-s.closech:
@@ -327,7 +329,11 @@ func (s *session) readFrames() {
 		}
 		frame, err := s.framer.ReadFrame()
 		if err != nil {
-			s.close()
+			status := framing.GoAwayInternalError
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				status = framing.GoAwayOK
+			}
+			s.close(status)
 			return
 		}
 		s.dispatch(frame)
@@ -375,17 +381,25 @@ func (s *session) handleSettings(settings *framing.SettingsFrame) {
 
 // handleReq initiates a stream
 func (s *session) handleReq(syn *framing.SynStreamFrame) {
+	// this is the only thread that can change the last stream id,
+	// so reading without a lock here is ok.
+	// however, we can race between writing here and reading
+	// in the close method.
 	if s.lastClientStream == 0 {
 		if syn.StreamId != 1 {
-			s.sessionError(framing.GoAwayProtocolError)
+			s.close(framing.GoAwayProtocolError)
 			return
 		}
+		s.mu.Lock()
 		s.lastClientStream = 1
+		s.mu.Unlock()
 	} else if syn.StreamId != s.lastClientStream+2 {
-		s.sessionError(framing.GoAwayProtocolError)
+		s.close(framing.GoAwayProtocolError)
 		return
 	} else {
+		s.mu.Lock()
 		s.lastClientStream += 2
+		s.mu.Unlock()
 	}
 
 	if s.numStreams() == int(s.maxStreams) {
@@ -468,19 +482,19 @@ func (s *session) handleData(data *framing.InDataFrame) {
 		s.sendRst(data.StreamId, framing.InvalidStream)
 		err := data.Close()
 		if err != nil {
-			s.close()
+			s.close(framing.GoAwayInternalError)
 			return
 		}
 		return
 	}
 	err := s.readData(stream, data)
 	if err != nil {
-		s.close()
+		s.close(framing.GoAwayInternalError)
 		return
 	}
 	err = data.Close()
 	if err != nil {
-		s.close()
+		s.close(framing.GoAwayInternalError)
 	}
 
 }
