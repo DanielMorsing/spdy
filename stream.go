@@ -81,7 +81,10 @@ func (str *stream) handleReq(hnd http.Handler, hdr http.Header) {
 		finch:  str.session.finch,
 		reset:  str.reset,
 	}
-	rw.bufw = bufio.NewWriter(str)
+	// might seem small for a buffer, but the frame size is directly linked
+	// to when this bufio flushes and we need to keep the frame size small to
+	// multiplex the network properly.
+	rw.bufw = bufio.NewWriterSize(str, 2000)
 	if !str.receivedFin {
 		req.Body = ioutil.NopCloser(str)
 	}
