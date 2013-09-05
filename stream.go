@@ -24,6 +24,7 @@ type stream struct {
 	// window size
 	sendWindow    uint32
 	receiveWindow uint32
+	windowOffset  uint32
 	priority      uint8
 	reset         chan error
 	wrch          chan streamWrite
@@ -202,16 +203,17 @@ func (str *stream) Read(b []byte) (int, error) {
 	defer str.mu.Unlock()
 	for {
 		n, err := str.buf.Read(b)
-		if err != io.EOF {
-			select {
-			case str.session.windowOut <- windowupdate{n, str.id}:
-				str.receiveWindow += uint32(n)
-			case <-str.reset:
-				return n, io.ErrClosedPipe
+		str.windowOffset += uint32(n)
+		if err != io.EOF || str.receivedFin {
+			if str.windowOffset > 4096 {
+				select {
+				case str.session.windowOut <- windowupdate{int(str.windowOffset), str.id}:
+					str.receiveWindow += str.windowOffset
+					str.windowOffset = 0
+				case <-str.reset:
+					return n, io.ErrClosedPipe
+				}
 			}
-			return n, err
-		}
-		if str.receivedFin {
 			return n, err
 		}
 		gotNew := make(chan struct{}, 1)
