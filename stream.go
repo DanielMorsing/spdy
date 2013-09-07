@@ -82,10 +82,7 @@ func (str *stream) handleReq(hnd http.Handler, hdr http.Header) {
 		finch:  str.session.finch,
 		reset:  str.reset,
 	}
-	// might seem small for a buffer, but the frame size is directly linked
-	// to when this bufio flushes and we need to keep the frame size small to
-	// multiplex the network properly.
-	rw.bufw = bufio.NewWriterSize(str, 2000)
+	rw.bufw = bufio.NewWriter(str)
 	if !str.receivedFin {
 		req.Body = ioutil.NopCloser(str)
 	}
@@ -242,6 +239,12 @@ func (str *stream) buildDataframe(data *framing.DataFrame, b []byte) int {
 	if str.sendWindow == 0 {
 		str.blocked = true
 		return 0
+	}
+
+	// limit frame size so that multiple streams are more efficiently multiplexed
+	// on to the connection.
+	if len(b) > 2000 {
+		b = b[:2000]
 	}
 	if len(b) > int(str.sendWindow) {
 		b = b[:str.sendWindow]
