@@ -176,16 +176,24 @@ func (s *session) writeFrame(f framing.Frame) error {
 	}
 	err := s.framer.WriteFrame(f)
 	if err != nil {
-		// error on write, can't send anything, so just close without sending goaway
-		s.close(noGoAway)
 		return err
 	}
-	err = s.bw.Flush()
-	if err != nil {
+	return s.bw.Flush()
+}
+
+// writeError handles any error that happens when writing to the connection
+// it returns whether the error was terminal.
+func (s *session) writeError(err error) bool {
+	switch e := err.(type) {
+	case net.Error:
+		// network error when writing frame. Just close without goaway frame.
 		s.close(noGoAway)
-		return err
+	case *framing.Error:
+		// framing will call you out on a couple of errors
+		log.Println(e)
+		s.close(framing.GoAwayInternalError)
 	}
-	return nil
+	return true
 }
 
 // serve handles events coming from the various streams.
@@ -201,7 +209,7 @@ func (s *session) serve() {
 				continue
 			}
 			err := s.writeFrame(&s.data)
-			if err != nil {
+			if err != nil && s.writeError(err) {
 				return
 			}
 			select {
@@ -211,31 +219,31 @@ func (s *session) serve() {
 		case syn := <-s.ackch:
 			makeSynReply(&s.reply, syn.hdr, syn.str)
 			err := s.writeFrame(&s.reply)
-			if err != nil {
+			if err != nil && s.writeError(err) {
 				return
 			}
 		case fin := <-s.finch:
 			makeFin(&s.data, fin.id)
 			err := s.writeFrame(&s.data)
-			if err != nil {
+			if err != nil && s.writeError(err) {
 				return
 			}
 			s.closeStream(fin, false)
 		case f := <-s.pingch:
 			err := s.writeFrame(f)
-			if err != nil {
+			if err != nil && s.writeError(err) {
 				return
 			}
 		case f := <-s.sendReset:
 			err := s.writeFrame(f)
-			if err != nil {
+			if err != nil && s.writeError(err) {
 				return
 			}
 		case wo := <-s.windowOut:
 			s.window.StreamId = wo.id
 			s.window.DeltaWindowSize = uint32(wo.d)
 			err := s.writeFrame(&s.window)
-			if err != nil {
+			if err != nil && s.writeError(err) {
 				return
 			}
 		case <-s.closech:
