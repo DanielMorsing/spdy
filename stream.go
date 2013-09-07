@@ -200,8 +200,12 @@ func (str *stream) Read(b []byte) (int, error) {
 	defer str.mu.Unlock()
 	for {
 		n, err := str.buf.Read(b)
+		if str.receivedFin {
+			// have everything buffered, no need to update window size
+			return n, err
+		}
 		str.windowOffset += uint32(n)
-		if err != io.EOF || str.receivedFin {
+		if err != io.EOF {
 			if str.windowOffset > 4096 {
 				select {
 				case str.session.windowOut <- windowupdate{int(str.windowOffset), str.id}:
