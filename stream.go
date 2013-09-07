@@ -27,7 +27,6 @@ type stream struct {
 	windowOffset  uint32
 	priority      uint8
 	reset         chan error
-	wrch          chan streamWrite
 	retch         chan int
 	session       *session
 	receivedFin   bool
@@ -49,7 +48,6 @@ func newStream(sess *session, syn *framing.SynStreamFrame) *stream {
 		receiveWindow: sess.receiveWindow,
 		reset:         make(chan error),
 		retch:         make(chan int),
-		wrch:          sess.streamch,
 		session:       sess,
 	}
 	s.cond = sync.NewCond(&s.mu)
@@ -78,9 +76,6 @@ func (str *stream) handleReq(hnd http.Handler, hdr http.Header) {
 	rw := responseWriter{
 		stream: str,
 		header: make(http.Header),
-		ackch:  str.session.ackch,
-		finch:  str.session.finch,
-		reset:  str.reset,
 	}
 	rw.bufw = bufio.NewWriter(str)
 	if !str.receivedFin {
@@ -155,7 +150,7 @@ func (str *stream) Write(b []byte) (int, error) {
 	n := 0
 	var err error
 	sw := streamWrite{b, str}
-	ch := str.wrch
+	ch := str.session.streamch
 	retch := chan int(nil)
 	for {
 		if str.isClosed() {
@@ -179,7 +174,7 @@ func (str *stream) Write(b []byte) (int, error) {
 		case ret := <-retch:
 			n += ret
 			b = b[ret:]
-			ch = str.wrch
+			ch = str.session.streamch
 			retch = nil
 			continue
 		case err = <-str.reset:
@@ -258,6 +253,34 @@ func (str *stream) buildDataframe(data *framing.DataFrame, b []byte) int {
 	return len(b)
 }
 
+type strAck struct {
+	hdr http.Header
+	str *stream
+}
+
+// sends a synreply frame
+func (str *stream) sendAck(hdr http.Header) {
+	if str.isClosed() {
+		return
+	}
+	select {
+	case str.session.ackch <- strAck{hdr, str}:
+	case _ = <-str.reset:
+		str.closed = true
+	}
+}
+
+func (str *stream) sendFin() {
+	if str.isClosed() {
+		return
+	}
+	select {
+	case str.session.finch <- str:
+	case _ = <-str.reset:
+	}
+	str.closed = true
+}
+
 // responseWriter is the type passed to the request handler.
 // it is only touched by the handling goroutine.
 type responseWriter struct {
@@ -266,13 +289,6 @@ type responseWriter struct {
 	header        http.Header
 
 	bufw *bufio.Writer
-
-	reset chan error
-
-	// channels to send header
-	ackch  chan rwAck
-	finch  chan *stream
-	closed bool
 }
 
 func (rw *responseWriter) Write(b []byte) (int, error) {
@@ -280,19 +296,6 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 		rw.WriteHeader(http.StatusOK)
 	}
 	return rw.bufw.Write(b)
-}
-
-func (rw *responseWriter) isClosed() bool {
-	if rw.closed {
-		return true
-	}
-	select {
-	case <-rw.reset:
-		rw.closed = true
-		return true
-	default:
-		return false
-	}
 }
 
 func (rw *responseWriter) Header() http.Header {
@@ -307,40 +310,15 @@ func (rw *responseWriter) WriteHeader(code int) {
 	s := fmt.Sprintf("%d %s", code, http.StatusText(code))
 	rw.header.Set(":status", s)
 	rw.header.Set(":version", "HTTP/1.1")
-	rw.sendAck(rw.header)
+	rw.stream.sendAck(rw.header)
 	rw.headerWritten = true
 }
 
-type rwAck struct {
-	hdr http.Header
-	str *stream
-}
-
-// sends a synreply frame
-func (rw *responseWriter) sendAck(hdr http.Header) {
-	if rw.isClosed() {
-		return
-	}
-	select {
-	case rw.ackch <- rwAck{hdr, rw.stream}:
-	case _ = <-rw.reset:
-		rw.closed = true
-	}
-}
-
-// closes stream. Sends a data frame with the Fin flag set
 func (rw *responseWriter) close() error {
 	if !rw.headerWritten {
 		rw.WriteHeader(http.StatusOK)
 	}
 	rw.bufw.Flush()
-	if rw.isClosed() {
-		return nil
-	}
-	select {
-	case rw.finch <- rw.stream:
-	case _ = <-rw.reset:
-	}
-	rw.closed = true
+	rw.stream.sendFin()
 	return nil
 }

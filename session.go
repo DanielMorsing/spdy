@@ -37,7 +37,7 @@ type session struct {
 
 	// channels to communicate with streams
 	streamch chan streamWrite
-	ackch    chan rwAck
+	ackch    chan strAck
 	finch    chan *stream
 
 	// channels to communicate between the 2 goroutines
@@ -71,7 +71,7 @@ func (ps *Server) newSession(c net.Conn) (*session, error) {
 		maxStreams:        100,
 		closech:           make(chan struct{}),
 		streamch:          make(chan streamWrite),
-		ackch:             make(chan rwAck),
+		ackch:             make(chan strAck),
 		finch:             make(chan *stream),
 		pingch:            make(chan *framing.PingFrame, 1),
 		sendReset:         make(chan *framing.RstStreamFrame, 1),
