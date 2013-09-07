@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"container/heap"
 	"github.com/DanielMorsing/spdy/framing"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -338,8 +339,14 @@ func (s *session) readFrames() {
 		frame, err := s.framer.ReadFrame()
 		if err != nil {
 			status := framing.GoAwayInternalError
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				status = framing.GoAwayOK
+			if ne, ok := err.(net.Error); ok {
+				if ne.Timeout() {
+					status = framing.GoAwayOK
+				} else if !ne.Temporary() {
+					status = noGoAway
+				}
+			} else if err == io.EOF {
+				status = noGoAway
 			}
 			s.close(status)
 			return
