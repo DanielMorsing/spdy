@@ -6,6 +6,7 @@ package spdy
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"github.com/DanielMorsing/spdy/framing"
 	"io"
@@ -22,35 +23,33 @@ type stream struct {
 	id framing.StreamId
 
 	// window size
-	sendWindow    uint32
-	receiveWindow uint32
-	windowOffset  uint32
-	priority      uint8
-	reset         chan error
-	retch         chan int
-	session       *session
-	receivedFin   bool
-	sentFin       bool
-	blocked       bool
-	closed        bool
-	buf           bytes.Buffer
-	cond          *sync.Cond
+	sendWindow       uint32
+	receiveWindow    uint32
+	windowOffset     uint32
+	priority         uint8
+	reset            chan struct{}
+	recvWindowUpdate chan struct{}
+	sendWindowUpdate chan struct{}
+	session          *session
+	receivedFin      bool
+	closed           bool
+	buf              bytes.Buffer
 
-	// mutex to protect the window variable
+	// mutex to protect the window variables
 	mu sync.Mutex
 }
 
 func newStream(sess *session, syn *framing.SynStreamFrame) *stream {
 	s := &stream{
-		id:            syn.StreamId,
-		priority:      syn.Priority,
-		sendWindow:    sess.initialSendWindow,
-		receiveWindow: sess.receiveWindow,
-		reset:         make(chan error),
-		retch:         make(chan int),
-		session:       sess,
+		id:               syn.StreamId,
+		priority:         syn.Priority,
+		sendWindow:       sess.initialSendWindow,
+		receiveWindow:    sess.receiveWindow,
+		reset:            make(chan struct{}),
+		session:          sess,
+		sendWindowUpdate: make(chan struct{}, 1),
+		recvWindowUpdate: make(chan struct{}, 1),
 	}
-	s.cond = sync.NewCond(&s.mu)
 	if syn.CFHeader.Flags&framing.ControlFlagFin != 0 {
 		s.receivedFin = true
 	}
@@ -72,10 +71,23 @@ func (str *stream) isClosed() bool {
 }
 
 func (str *stream) handleReq(hnd http.Handler, hdr http.Header) {
-	req := mkrequest(hdr)
 	rw := responseWriter{
 		stream: str,
 		header: make(http.Header),
+	}
+
+	req, err := mkrequest(hdr)
+	if err != nil {
+		// spdy is super weird in the case where a stream req doesn't have the right headers.
+		// you need to send a 400 reply, rather than a stream reset.
+		go func() {
+			rw.WriteHeader(http.StatusBadRequest)
+			err := rw.close()
+			if err != nil {
+				log.Println("handlereq:", err)
+			}
+		}()
+		return
 	}
 	rw.bufw = bufio.NewWriter(str)
 	if !str.receivedFin {
@@ -98,11 +110,11 @@ var requiredHeaders = [...]string{
 	":host",
 }
 
-func mkrequest(hdr http.Header) *http.Request {
+func mkrequest(hdr http.Header) (*http.Request, error) {
 
 	for _, r := range requiredHeaders {
 		if _, ok := hdr[r]; !ok {
-			panic("STREAM ERROR")
+			return nil, errors.New("invalid headers")
 		}
 	}
 	rm := make([]string, 0, len(hdr))
@@ -137,91 +149,69 @@ func mkrequest(hdr http.Header) *http.Request {
 		delete(hdr, k)
 	}
 	req.Header = hdr
-	return req
-}
-
-// types for ferrying data back and forth to the session
-type streamWrite struct {
-	b   []byte
-	str *stream
+	return req, nil
 }
 
 func (str *stream) Write(b []byte) (int, error) {
 	n := 0
 	var err error
-	sw := streamWrite{b, str}
-	ch := str.session.streamch
-	retch := chan int(nil)
 	for {
-		if str.isClosed() {
-			return 0, io.ErrClosedPipe
-		}
 		if len(b) == 0 {
 			break
 		}
 
-		sw.b = b
-		// Subtle code alert!
-		// if we hit the flow control cap, we wont receive an error
-		// until the session has had the window expanded.
-		// Use the trick from advanced concurrency pattern talk
-		// to handle resets.
-		select {
-		case ch <- sw:
-			retch = str.retch
-			ch = nil
+		ob, blocked := str.limitWindow(b)
+		if blocked {
+			err := str.waitWindow()
+			if err != nil {
+				return n, err
+			}
 			continue
-		case ret := <-retch:
-			n += ret
-			b = b[ret:]
-			ch = str.session.streamch
-			retch = nil
-			continue
-		case err = <-str.reset:
-			str.closed = true
-			return n, io.ErrClosedPipe
 		}
+
+		err := str.session.of.write(str, ob)
+		if err != nil {
+			return n, err
+		}
+		n += len(ob)
+		b = b[len(ob):]
+
 	}
 	return n, err
 }
 
-type windowupdate struct {
-	d  int
-	id framing.StreamId
+func (str *stream) waitWindow() error {
+	select {
+	case <-str.sendWindowUpdate:
+		return nil
+	case <-str.reset:
+		return io.ErrClosedPipe
+	}
 }
 
 func (str *stream) Read(b []byte) (int, error) {
-	str.mu.Lock()
-	defer str.mu.Unlock()
 	for {
+		str.mu.Lock()
 		n, err := str.buf.Read(b)
 		if str.receivedFin {
 			// have everything buffered, no need to update window size
+			str.mu.Unlock()
 			return n, err
 		}
 		str.windowOffset += uint32(n)
 		if err != io.EOF {
-			if str.windowOffset > 4096 {
-				select {
-				case str.session.windowOut <- windowupdate{int(str.windowOffset), str.id}:
-					str.receiveWindow += str.windowOffset
-					str.windowOffset = 0
-				case <-str.reset:
-					return n, io.ErrClosedPipe
-				}
+			if str.receiveWindow < 4096 {
+				str.receiveWindow += str.windowOffset
+				str.session.of.sendWindowUpdate(str, str.windowOffset)
+				str.windowOffset = 0
 			}
+			str.mu.Unlock()
 			return n, err
 		}
-		gotNew := make(chan struct{}, 1)
-		go func() {
-			str.cond.Wait()
-			gotNew <- struct{}{}
-		}()
+		str.mu.Unlock()
 		select {
-		case <-gotNew:
+		case <-str.recvWindowUpdate:
 		case <-str.reset:
-			// make sure we don't leave a goroutine around
-			str.cond.Signal()
 			return 0, io.ErrClosedPipe
 		}
 	}
@@ -230,14 +220,12 @@ func (str *stream) Read(b []byte) (int, error) {
 // builds a dataframe for the byte slice and updates the window.
 // if the window is empty, set the blocked field and return 0
 // this function is called from the session goroutine.
-func (str *stream) buildDataframe(data *framing.DataFrame, b []byte) int {
-	data.StreamId = str.id
-	data.Flags = 0
+func (str *stream) limitWindow(b []byte) ([]byte, bool) {
 	str.mu.Lock()
 	defer str.mu.Unlock()
+
 	if str.sendWindow == 0 {
-		str.blocked = true
-		return 0
+		return b, true
 	}
 
 	// limit frame size so that multiple streams are more efficiently multiplexed
@@ -249,13 +237,7 @@ func (str *stream) buildDataframe(data *framing.DataFrame, b []byte) int {
 		b = b[:str.sendWindow]
 	}
 	str.sendWindow -= uint32(len(b))
-	data.Data = b
-	return len(b)
-}
-
-type strAck struct {
-	hdr http.Header
-	str *stream
+	return b, false
 }
 
 // sends a synreply frame
@@ -263,22 +245,19 @@ func (str *stream) sendAck(hdr http.Header) {
 	if str.isClosed() {
 		return
 	}
-	select {
-	case str.session.ackch <- strAck{hdr, str}:
-	case _ = <-str.reset:
-		str.closed = true
-	}
+	str.session.of.reply(str, hdr)
 }
 
 func (str *stream) sendFin() {
 	if str.isClosed() {
 		return
 	}
+	str.session.of.sendFin(str)
+	str.closed = true
 	select {
 	case str.session.finch <- str:
-	case _ = <-str.reset:
+	case <-str.reset:
 	}
-	str.closed = true
 }
 
 // responseWriter is the type passed to the request handler.
