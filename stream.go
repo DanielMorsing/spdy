@@ -81,11 +81,9 @@ func (str *stream) handleReq(hnd http.Handler, hdr http.Header) {
 		// spdy is super weird in the case where a stream req doesn't have the right headers.
 		// you need to send a 400 reply, rather than a stream reset.
 		go func() {
+			defer rw.close()
 			rw.WriteHeader(http.StatusBadRequest)
-			err := rw.close()
-			if err != nil {
-				log.Println("handlereq:", err)
-			}
+			
 		}()
 		return
 	}
@@ -94,11 +92,8 @@ func (str *stream) handleReq(hnd http.Handler, hdr http.Header) {
 		req.Body = ioutil.NopCloser(str)
 	}
 	go func() {
+		defer rw.close()
 		hnd.ServeHTTP(&rw, req)
-		err := rw.close()
-		if err != nil {
-			log.Println("handlereq:", err)
-		}
 	}()
 }
 
@@ -191,24 +186,10 @@ func (str *stream) waitWindow() error {
 
 func (str *stream) Read(b []byte) (int, error) {
 	for {
-		str.mu.Lock()
-		n, err := str.buf.Read(b)
-		if str.receivedFin {
-			// have everything buffered, no need to update window size
-			str.mu.Unlock()
+		n, gotData, err := str.tryRead(b)
+		if gotData {
 			return n, err
 		}
-		str.windowOffset += uint32(n)
-		if err != io.EOF {
-			if str.receiveWindow < 4096 {
-				str.receiveWindow += str.windowOffset
-				str.session.of.sendWindowUpdate(str, str.windowOffset)
-				str.windowOffset = 0
-			}
-			str.mu.Unlock()
-			return n, err
-		}
-		str.mu.Unlock()
 		select {
 		case <-str.recvWindowUpdate:
 		case <-str.reset:
@@ -216,6 +197,26 @@ func (str *stream) Read(b []byte) (int, error) {
 		}
 	}
 }
+
+func (str *stream) tryRead(b []byte) (int, bool, error) {
+	str.mu.Lock()
+	defer str.mu.Unlock()
+	n, err := str.buf.Read(b)
+	if str.receivedFin {
+		// have everything buffered, no need to update window size
+		return n, true, err
+	}
+	str.windowOffset += uint32(n)
+	if err != io.EOF {
+		if str.receiveWindow < 4096 {
+			str.receiveWindow += str.windowOffset
+			str.session.of.sendWindowUpdate(str, str.windowOffset)
+			str.windowOffset = 0
+		}
+		return n, true, err
+	}
+	return 0, false, nil
+} 
 
 // builds a dataframe for the byte slice and updates the window.
 // if the window is empty, set the blocked field and return 0
