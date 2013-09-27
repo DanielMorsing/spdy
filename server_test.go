@@ -3,13 +3,12 @@
 
 // high level tests.
 
-package spdy_test
+package spdy
 
 import (
 	"bytes"
 	"crypto/tls"
 	"fmt"
-	"github.com/DanielMorsing/spdy"
 	"github.com/DanielMorsing/spdy/framing"
 	"io/ioutil"
 	"net"
@@ -43,11 +42,17 @@ func init() {
 		rw.WriteHeader(200)
 		fmt.Fprintf(rw, "your name is %s %s\n", rq.Form["firstname"][0], rq.Form["lastname"][0])
 	})
-	srv := &spdy.Server{
-		Addr:    "localhost:4444",
-		Handler: ds,
+	srv := &Server{
+		Server: http.Server{
+			Addr:    "localhost:4444",
+			Handler: ds,
+		},
 	}
-	go srv.ListenAndServe()
+	l, err := net.Listen("tcp", "localhost:4444")
+	if err != nil {
+		panic(err)
+	}
+	go srv.serve(l)
 	// a complete hack, but it's needed so that the connection isn't refused.
 	time.Sleep(200 * time.Millisecond)
 }

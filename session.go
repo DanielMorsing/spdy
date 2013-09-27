@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"time"
 )
 
@@ -38,7 +39,8 @@ type session struct {
 	closemsgch chan framing.GoAwayStatus
 
 	// the server that initiated this session
-	server *Server
+	server  *http.Server
+	handler http.Handler
 
 	// the initial window size that streams should be created with
 	initialSendWindow uint32
@@ -52,12 +54,13 @@ type session struct {
 }
 
 // newSession initiates a SPDY session
-func (ps *Server) newSession(c net.Conn) (*session, error) {
+func newSession(srv *http.Server, c net.Conn, hnd http.Handler) (*session, error) {
 	s := &session{
 		maxStreams:        100,
 		closech:           make(chan struct{}),
 		conn:              c,
-		server:            ps,
+		server:            srv,
+		handler:           hnd,
 		initialSendWindow: 64 << 10, // 64 kb
 		receiveWindow:     64 << 10,
 		streams:           make(map[framing.StreamId]*stream),
@@ -78,7 +81,7 @@ func (ps *Server) newSession(c net.Conn) (*session, error) {
 		framer:       f,
 		conn:         c,
 		bw:           bw,
-		writetimeout: ps.WriteTimeout,
+		writetimeout: srv.WriteTimeout,
 		session:      s,
 		requestch:    make(chan frameRq),
 		releasech:    make(chan struct{}),
@@ -123,7 +126,6 @@ func (s *session) doclose(status framing.GoAwayStatus) {
 		s.of.bw.Flush()
 	}
 	close(s.closech)
-	s.conn.Close()
 }
 
 func (s *session) serve() {
@@ -230,7 +232,7 @@ func (s *session) handleReq(syn *framing.SynStreamFrame) {
 
 	stream := newStream(s, syn)
 	s.streams[stream.id] = stream
-	stream.handleReq(s.server.Handler, syn.Headers)
+	stream.handleReq(s.handler, syn.Headers)
 }
 
 func (s *session) handleRst(rst *framing.RstStreamFrame) {
