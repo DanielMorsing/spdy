@@ -268,7 +268,7 @@ func (s *session) handleWindowUpdate(upd *framing.WindowUpdateFrame) {
 	str.sendWindow = newWindow
 	if oldwind == 0 {
 		select {
-		case str.sendWindowUpdate <- struct{}{}:
+		case str.windowUpdate <- struct{}{}:
 		default:
 		}
 	}
@@ -330,7 +330,7 @@ func (s *session) readData(stream *stream, data *framing.InDataFrame) error {
 	}
 	stream.receivedFin = data.Flags&framing.DataFlagFin != 0
 	select {
-	case stream.recvWindowUpdate <- struct{}{}:
+	case stream.recvData <- struct{}{}:
 	default:
 	}
 	return nil

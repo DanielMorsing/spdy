@@ -23,17 +23,17 @@ type stream struct {
 	id framing.StreamId
 
 	// window size
-	sendWindow       uint32
-	receiveWindow    uint32
-	windowOffset     uint32
-	priority         uint8
-	reset            chan struct{}
-	recvWindowUpdate chan struct{}
-	sendWindowUpdate chan struct{}
-	session          *session
-	receivedFin      bool
-	closed           bool
-	buf              bytes.Buffer
+	sendWindow    uint32
+	receiveWindow uint32
+	windowOffset  uint32
+	priority      uint8
+	reset         chan struct{}
+	recvData      chan struct{}
+	windowUpdate  chan struct{}
+	session       *session
+	receivedFin   bool
+	closed        bool
+	buf           bytes.Buffer
 
 	// mutex to protect the window variables
 	mu sync.Mutex
@@ -41,14 +41,14 @@ type stream struct {
 
 func newStream(sess *session, syn *framing.SynStreamFrame) *stream {
 	s := &stream{
-		id:               syn.StreamId,
-		priority:         syn.Priority,
-		sendWindow:       sess.initialSendWindow,
-		receiveWindow:    sess.receiveWindow,
-		reset:            make(chan struct{}),
-		session:          sess,
-		sendWindowUpdate: make(chan struct{}, 1),
-		recvWindowUpdate: make(chan struct{}, 1),
+		id:            syn.StreamId,
+		priority:      syn.Priority,
+		sendWindow:    sess.initialSendWindow,
+		receiveWindow: sess.receiveWindow,
+		reset:         make(chan struct{}),
+		session:       sess,
+		windowUpdate:  make(chan struct{}, 1),
+		recvData:      make(chan struct{}, 1),
 	}
 	if syn.CFHeader.Flags&framing.ControlFlagFin != 0 {
 		s.receivedFin = true
@@ -83,7 +83,7 @@ func (str *stream) handleReq(hnd http.Handler, hdr http.Header) {
 		go func() {
 			defer rw.close()
 			rw.WriteHeader(http.StatusBadRequest)
-			
+
 		}()
 		return
 	}
@@ -177,7 +177,7 @@ func (str *stream) Write(b []byte) (int, error) {
 
 func (str *stream) waitWindow() error {
 	select {
-	case <-str.sendWindowUpdate:
+	case <-str.windowUpdate:
 		return nil
 	case <-str.reset:
 		return io.ErrClosedPipe
@@ -191,7 +191,7 @@ func (str *stream) Read(b []byte) (int, error) {
 			return n, err
 		}
 		select {
-		case <-str.recvWindowUpdate:
+		case <-str.recvData:
 		case <-str.reset:
 			return 0, io.ErrClosedPipe
 		}
@@ -216,7 +216,7 @@ func (str *stream) tryRead(b []byte) (int, bool, error) {
 		return n, true, err
 	}
 	return 0, false, nil
-} 
+}
 
 // builds a dataframe for the byte slice and updates the window.
 // if the window is empty, set the blocked field and return 0
