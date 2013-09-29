@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// sentinel value for when closing without a goaway frame
 const noGoAway framing.GoAwayStatus = 0xff
 
 // session represents a spdy session
@@ -91,13 +92,13 @@ func newSession(srv *http.Server, c net.Conn, hnd http.Handler) (*session, error
 	return s, nil
 }
 
-// closeStream closes a stream and removes it from the map if both ends have been closed.
-// if the closing operation was caused by a reset, just remove the stream, regardless of state.
+// closeStream closes a stream and removes it from the active connections map.
 func (s *session) closeStream(str *stream) {
 	close(str.reset)
 	delete(s.streams, str.id)
 }
 
+// Sends a message to the session that it should close
 func (s *session) close(status framing.GoAwayStatus) {
 	select {
 	case s.closemsgch <- status:
@@ -128,6 +129,7 @@ func (s *session) doclose(status framing.GoAwayStatus) {
 	close(s.closech)
 }
 
+// the main loop for the session goroutine.
 func (s *session) serve() {
 	go s.readFrames()
 	for {
@@ -143,6 +145,7 @@ func (s *session) serve() {
 	}
 }
 
+// Read frames and send them to the session goroutine
 func (s *session) readFrames() {
 	for {
 		if d := s.server.ReadTimeout; d != 0 {
@@ -276,6 +279,7 @@ func (s *session) handleWindowUpdate(upd *framing.WindowUpdateFrame) {
 	}
 }
 
+// send a reset frame to the client and remove the stream from the active set.
 func (s *session) sendRst(id framing.StreamId, status framing.RstStreamStatus) {
 	f := &framing.RstStreamFrame{
 		StreamId: id,
@@ -313,6 +317,7 @@ func (s *session) handleData(data *framing.InDataFrame) {
 
 }
 
+// read data from a data frame into the streams buffer.
 func (s *session) readData(stream *stream, data *framing.InDataFrame) error {
 	stream.mu.Lock()
 	defer stream.mu.Unlock()

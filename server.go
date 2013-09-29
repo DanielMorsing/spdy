@@ -3,10 +3,7 @@
 
 // package spdy implements a HTTP server on top of code.google.com/p/go.net/spdy.
 //
-// Note that SPDY is normally deployed on the HTTPS port and the protocol to use is then
-// negotiated over TLS. To enable fallback to HTTPS when the client is not SPDY enabled, this package
-// starts a HTTPS server that connections are forwarded to if they fail negotiation.
-//
+// This package provides a http server that uses the TLSNextProto feature in net/http to serve connections that where negotiated to be SPDY 3.
 // The HTTPS fallback feature can be disabled by providing a TLS config which does not include
 // http/1.1 in its valid NPN protocols.
 //
@@ -24,7 +21,8 @@ type Server struct {
 	http.Server
 }
 
-// ListenAndServeTLS listens on srv.Addr and calls Serve to handle incoming connections.
+// ListenAndServeTLS starts a SPDY forwarding server, using the parameters in the embedded 
+// http.Server. 
 //
 // certFile and keyFile must be filenames to a pair of valid certificate and key.
 func (srv *Server) ListenAndServeTLS(certFile, keyFile string) error {

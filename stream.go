@@ -78,7 +78,7 @@ func (str *stream) handleReq(hnd http.Handler, hdr http.Header) {
 
 	req, err := mkrequest(hdr)
 	if err != nil {
-		// spdy is super weird in the case where a stream req doesn't have the right headers.
+		// spdy is weird in the case where a stream req doesn't have the right headers.
 		// you need to send a 400 reply, rather than a stream reset.
 		go func() {
 			defer rw.close()
@@ -218,9 +218,7 @@ func (str *stream) tryRead(b []byte) (int, bool, error) {
 	return 0, false, nil
 }
 
-// builds a dataframe for the byte slice and updates the window.
-// if the window is empty, set the blocked field and return 0
-// this function is called from the session goroutine.
+// Limits a byte slice to fit within the sending window
 func (str *stream) limitWindow(b []byte) ([]byte, bool) {
 	str.mu.Lock()
 	defer str.mu.Unlock()

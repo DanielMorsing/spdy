@@ -64,6 +64,7 @@ func (of *outFramer) writeError(err error) bool {
 	return true
 }
 
+// Plumbing for prioritizing requesters that need the outframer
 type frameRq struct {
 	str    *stream
 	ofchan chan *outFramer
@@ -101,6 +102,8 @@ func frameLess(a, b *frameRq) bool {
 	return a.str.priority < b.str.priority
 }
 
+
+// prioritize does the heavy lifting in the prioritization algorithm.
 func (of *outFramer) prioritize() {
 	var prio prioQueue
 	var nextrq frameRq
@@ -111,12 +114,15 @@ func (of *outFramer) prioritize() {
 	for {
 		if !taken {
 			outchan = nextrq.ofchan
+			// if we're dealing with a stream,
+			// listen for resets.
 			if nextrq.str != nil {
 				reset = nextrq.str.reset
 			} else {
 				reset = nil
 			}
 		} else {
+			// framer is taken, don't try to fufill pending requests
 			outchan = nil
 			reset = nil
 		}
@@ -135,6 +141,8 @@ func (of *outFramer) prioritize() {
 				nextrq = rq
 				continue
 			}
+			// if the incoming request is prioritized over the one pending,
+			// switch the requests and put the old req onto the heap
 			if frameLess(&rq, &nextrq) {
 				nextrq, rq = rq, nextrq
 			}
@@ -147,6 +155,8 @@ func (of *outFramer) prioritize() {
 	}
 }
 
+// Get the outFramer. If str is nil, it will be prioritized over all other requests.
+// nil is normally used by the session goroutine.
 func (of *outFramer) get(str *stream) error {
 	var reset chan struct{}
 	ch := make(chan *outFramer, 1)
@@ -172,6 +182,7 @@ func (of *outFramer) get(str *stream) error {
 	return nil
 }
 
+// release the outframer
 func (of *outFramer) release() {
 	select {
 	case of.releasech <- struct{}{}:
@@ -179,6 +190,11 @@ func (of *outFramer) release() {
 	}
 }
 
+// The following functions are the main interface to the outframer.
+// Using them is recommended since they reuse buffers internal to the outFramer
+// and ensures that other requesters are allowed access to the framer.
+
+// Write a data frame to the framer
 func (of *outFramer) write(str *stream, b []byte) error {
 	err := of.get(str)
 	if err != nil {
@@ -196,6 +212,7 @@ func (of *outFramer) write(str *stream, b []byte) error {
 	return err
 }
 
+// Write a ping frame to the framer.
 func (of *outFramer) ping(ping *framing.PingFrame) {
 	go func() {
 		err := of.get(nil)
@@ -210,6 +227,7 @@ func (of *outFramer) ping(ping *framing.PingFrame) {
 	}()
 }
 
+// Write a Synstream frame to the framer
 func (of *outFramer) reply(str *stream, hdr http.Header) error {
 
 	err := of.get(str)
@@ -229,6 +247,7 @@ func (of *outFramer) reply(str *stream, hdr http.Header) error {
 	return err
 }
 
+// Write an empty data frame with the fin flag set
 func (of *outFramer) sendFin(str *stream) error {
 	err := of.get(str)
 	if err != nil {
@@ -247,6 +266,7 @@ func (of *outFramer) sendFin(str *stream) error {
 	return err
 }
 
+// Write a window update frame
 func (of *outFramer) sendWindowUpdate(str *stream, delta uint32) error {
 	err := of.get(str)
 	if err != nil {
@@ -264,6 +284,7 @@ func (of *outFramer) sendWindowUpdate(str *stream, delta uint32) error {
 	return err
 }
 
+// send an arbitrary frame to the wire
 func (of *outFramer) sendFrame(str *stream, f framing.Frame) error {
 	err := of.get(str)
 	if err != nil {
