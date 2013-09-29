@@ -16,7 +16,6 @@ package spdy
 import (
 	"crypto/tls"
 	"log"
-	"net"
 	"net/http"
 )
 
@@ -66,26 +65,4 @@ func (srv *Server) servespdy(s *http.Server, conn *tls.Conn, hnd http.Handler) {
 		return
 	}
 	sess.serve()
-}
-
-// for local testing
-func (srv *Server) serve(l net.Listener) error {
-	for {
-		c, err := l.Accept()
-		if err != nil {
-			log.Println("accept:", err)
-			continue
-		}
-
-		sess, err := newSession(&srv.Server, c, srv.Handler)
-		if err != nil {
-			log.Println("could not start session:", err)
-			c.Close()
-			continue
-		}
-		go func() {
-			sess.serve()
-			sess.conn.Close()
-		}()
-	}
 }

@@ -42,20 +42,15 @@ func init() {
 		rw.WriteHeader(200)
 		fmt.Fprintf(rw, "your name is %s %s\n", rq.Form["firstname"][0], rq.Form["lastname"][0])
 	})
-	srv := &Server{
+	testsrv = &Server{
 		Server: http.Server{
 			Addr:    "localhost:4444",
 			Handler: ds,
 		},
 	}
-	l, err := net.Listen("tcp", "localhost:4444")
-	if err != nil {
-		panic(err)
-	}
-	go srv.serve(l)
-	// a complete hack, but it's needed so that the connection isn't refused.
-	time.Sleep(200 * time.Millisecond)
 }
+
+var testsrv *Server
 
 var corkch = func() chan struct{} {
 	c := make(chan struct{})
@@ -78,15 +73,20 @@ var clientConfig = tls.Config{
 }
 
 func newClientSession() (*framing.Framer, net.Conn) {
-	n, err := net.Dial("tcp", "localhost:4444")
+	srv, clnt := net.Pipe()
+	sess, err := newSession(&testsrv.Server, srv, testsrv.Server.Handler)
 	if err != nil {
 		panic(err)
 	}
-	framer, err := framing.NewFramer(n, n)
+	go func() {
+		sess.serve()
+		srv.Close()
+	}()
+	framer, err := framing.NewFramer(clnt, clnt)
 	if err != nil {
 		panic(err)
 	}
-	return framer, n
+	return framer, clnt
 }
 
 func goldenHeader() http.Header {
