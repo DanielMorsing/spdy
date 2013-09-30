@@ -26,8 +26,7 @@ type session struct {
 	maxStreams uint32
 	framer     *framing.Framer
 	conn       net.Conn
-	// buffered input output, since the Framer does small writes.
-	br *bufio.Reader
+	br         *bufio.Reader
 
 	framech chan framing.Frame
 
@@ -100,6 +99,8 @@ func (s *session) closeStream(str *stream) {
 
 // Sends a message to the session that it should close
 func (s *session) close(status framing.GoAwayStatus) {
+	// using a buffered channel, so this will always succeed on the first value.
+	// The rest are unimportant. No reason to close a session that's going away anyway.
 	select {
 	case s.closemsgch <- status:
 	default:
@@ -121,7 +122,7 @@ func (s *session) doclose(status framing.GoAwayStatus) {
 		// also we can't be blocked on this, so give timeout.
 		// using the general purpose method on the outframer adjusts the
 		// timeout, so go around it in this case.
-		s.of.get(nil)
+		s.of.acquire(nil)
 		s.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 		s.of.framer.WriteFrame(&goAway)
 		s.of.bw.Flush()

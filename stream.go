@@ -155,7 +155,7 @@ func (str *stream) Write(b []byte) (int, error) {
 			break
 		}
 
-		ob, blocked := str.limitWindow(b)
+		tb, blocked := str.truncateBuffer(b)
 		if blocked {
 			err := str.waitWindow()
 			if err != nil {
@@ -164,12 +164,12 @@ func (str *stream) Write(b []byte) (int, error) {
 			continue
 		}
 
-		err := str.session.of.write(str, ob)
+		err := str.session.of.write(str, tb)
 		if err != nil {
 			return n, err
 		}
-		n += len(ob)
-		b = b[len(ob):]
+		n += len(tb)
+		b = b[len(tb):]
 
 	}
 	return n, err
@@ -218,8 +218,9 @@ func (str *stream) tryRead(b []byte) (int, bool, error) {
 	return 0, false, nil
 }
 
-// Limits a byte slice to fit within the sending window
-func (str *stream) limitWindow(b []byte) ([]byte, bool) {
+// this method truncates the buffer to a more reasonable size for a spdy frame.
+// It also reports whether we're blocked on the sending window.
+func (str *stream) truncateBuffer(b []byte) ([]byte, bool) {
 	str.mu.Lock()
 	defer str.mu.Unlock()
 
@@ -292,11 +293,10 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.headerWritten = true
 }
 
-func (rw *responseWriter) close() error {
+func (rw *responseWriter) close() {
 	if !rw.headerWritten {
 		rw.WriteHeader(http.StatusOK)
 	}
 	rw.bufw.Flush()
 	rw.stream.sendFin()
-	return nil
 }

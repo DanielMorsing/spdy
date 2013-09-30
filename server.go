@@ -21,8 +21,8 @@ type Server struct {
 	http.Server
 }
 
-// ListenAndServeTLS starts a SPDY forwarding server, using the parameters in the embedded 
-// http.Server. 
+// ListenAndServeTLS starts a SPDY forwarding server, using the parameters in the embedded
+// http.Server.
 //
 // certFile and keyFile must be filenames to a pair of valid certificate and key.
 func (srv *Server) ListenAndServeTLS(certFile, keyFile string) error {
