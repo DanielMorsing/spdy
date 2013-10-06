@@ -34,6 +34,9 @@ type stream struct {
 	receivedFin   bool
 	closed        bool
 	buf           bytes.Buffer
+	
+	// channel to communicate with outframer.
+	ofchan chan struct{}
 
 	// mutex to protect the window variables
 	mu sync.Mutex
@@ -49,6 +52,7 @@ func newStream(sess *session, syn *framing.SynStreamFrame) *stream {
 		session:       sess,
 		windowUpdate:  make(chan struct{}, 1),
 		recvData:      make(chan struct{}, 1),
+		ofchan: make(chan struct{}, 1),
 	}
 	if syn.CFHeader.Flags&framing.ControlFlagFin != 0 {
 		s.receivedFin = true

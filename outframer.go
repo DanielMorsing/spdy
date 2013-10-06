@@ -158,11 +158,14 @@ func (of *outFramer) prioritize() {
 // nil is normally used by the session goroutine.
 func (of *outFramer) acquire(str *stream) error {
 	var reset chan struct{}
-	ch := make(chan struct{})
-	rq := frameRq{str, ch}
+	var ch chan struct{} 
 	if str != nil {
 		reset = str.reset
+		ch = str.ofchan
+	} else {
+		ch = make(chan struct{}, 1)
 	}
+	rq := frameRq{str, ch}
 
 	// Put self on request queue for the framer
 	select {
