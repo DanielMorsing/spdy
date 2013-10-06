@@ -51,11 +51,12 @@ func newStream(sess *session, syn *framing.SynStreamFrame) *stream {
 		reset:         make(chan struct{}),
 		session:       sess,
 		windowUpdate:  make(chan struct{}, 1),
-		recvData:      make(chan struct{}, 1),
 		ofchan: make(chan struct{}, 1),
 	}
 	if syn.CFHeader.Flags&framing.ControlFlagFin != 0 {
 		s.receivedFin = true
+	} else {
+		s.recvData = make(chan struct{}, 1)
 	}
 	return s
 
